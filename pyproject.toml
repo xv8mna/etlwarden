@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etlwarden"
+version = "0.1.0"
+description = "Pick a file, set a time, and it runs in the background."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+# Essentials only: the add-on Qt modules include GPL-only ones (QtCharts and others).
+dependencies = ["PySide6-Essentials>=6.6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/xv8mna/etlwarden"
+Issues = "https://github.com/xv8mna/etlwarden/issues"
+
+[project.scripts]
+etlwarden = "etlwarden.cli:main"
+
+[tool.setuptools]
+packages = ["etlwarden"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
