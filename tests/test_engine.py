@@ -207,6 +207,23 @@ def test_a_tafl_project_runs_and_its_failure_is_explained(data, tmp_path, exit_c
         assert run.message == "Exit code 1: Orders › 1. Import orders.csv: File not found: orders.csv"
 
 
+def test_the_standalone_exe_starts_its_engine_with_the_windowless_program(data, tmp_path, monkeypatch):
+    for name in ("etlwarden.exe", "etlwarden-console.exe"):
+        (tmp_path / name).write_bytes(b"")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "etlwarden-console.exe"))
+
+    command, cwd = engine_module.engine_command(data)
+
+    assert command == [str(tmp_path / "etlwarden.exe"), "--data-dir", str(data.root), "engine"]
+    assert cwd == tmp_path
+
+
+def test_from_source_the_engine_starts_as_a_python_module(data):
+    command, _cwd = engine_module.engine_command(data)
+    assert command[1:] == ["-m", "etlwarden", "--data-dir", str(data.root), "engine"]
+
+
 def test_a_restart_marks_unfinished_runs_as_interrupted(data, script):
     db = Database(data.db)
     job_id = db.add_job("Hello", script("ok.py"), "python", sched.every(60))

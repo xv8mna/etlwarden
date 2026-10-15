@@ -283,19 +283,31 @@ def _output_tail(path: Path, skip: int, size: int = 64 * 1024) -> str:
     return textfmt.decode_output(tail)
 
 
-def start_in_background(data: DataDir) -> subprocess.Popen:
-    """Start the engine as its own process. It keeps running after the window closes."""
+def engine_command(data: DataDir) -> tuple[list[str], Path]:
+    """The command that starts the engine as its own process, and the folder to start it in."""
+    if getattr(sys, "frozen", False):  # the standalone etlwarden.exe
+        program = Path(sys.executable)
+        windowless = program.with_name("etlwarden.exe")  # rather than etlwarden-console.exe
+        if windowless.exists():
+            program = windowless
+        return [str(program), "--data-dir", str(data.root), "engine"], program.parent
     python = Path(sys.executable)
     if sys.platform == "win32" and python.with_name("pythonw.exe").exists():
         python = python.with_name("pythonw.exe")  # no console window
+    return [str(python), "-m", "etlwarden", "--data-dir", str(data.root), "engine"], PROJECT_ROOT
+
+
+def start_in_background(data: DataDir) -> subprocess.Popen:
+    """Start the engine as its own process. It keeps running after the window closes."""
+    command, cwd = engine_command(data)
     options: dict = {}
     if sys.platform == "win32":
         options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
     return subprocess.Popen(
-        [str(python), "-m", "etlwarden", "--data-dir", str(data.root), "engine"],
-        cwd=PROJECT_ROOT,
+        command,
+        cwd=cwd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

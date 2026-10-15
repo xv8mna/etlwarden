@@ -39,7 +39,10 @@ def tafl_command(path: Path, settings: Settings) -> list[str]:
 
 
 def python_command(path: Path, settings: Settings) -> list[str]:
-    return [settings.get("python_path") or default_python(), str(path)]
+    python = settings.get("python_path") or default_python()
+    if not python:
+        raise RunnerError("Install Python, or set the path to python.exe in Settings.")
+    return [python, str(path)]
 
 
 def lua_command(path: Path, settings: Settings) -> list[str]:
@@ -153,11 +156,12 @@ def build_command(kind: str, path: str | os.PathLike[str], settings: Settings) -
     return KINDS[kind][1](path, settings)
 
 
-def default_python() -> str:
+def default_python() -> str | None:
     """The Python you get by typing `python` in a new terminal, so jobs find the packages
-    installed there. Falls back to the Python that etlwarden itself was installed with."""
+    installed there. Falls back to the Python that etlwarden itself was installed with;
+    the standalone etlwarden.exe has none to offer, so there it can be None."""
     found = find_program(["python.exe"] if sys.platform == "win32" else ["python3", "python"])
-    if found:
+    if found or getattr(sys, "frozen", False):
         return found
     base = Path(sys.base_prefix) / ("python.exe" if sys.platform == "win32" else "bin/python3")
     return str(base) if base.exists() else sys.executable
@@ -185,6 +189,19 @@ def job_environment() -> dict[str, str]:
     """The environment jobs run in: this one without etlwarden's own virtual environment,
     so a job that calls `python` gets the same one as in a new terminal."""
     env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        # The standalone etlwarden.exe sets variables that point into its own folder (Qt
+        # plugins, PyInstaller's bookkeeping). Jobs must not see them, and a job that is
+        # itself a PyInstaller program (a frozen tafl.exe, say) has to start fresh.
+        inside = _same_path(bundle)
+        for name, value in list(env.items()):
+            if name.upper() == "PATH":
+                folders = value.split(os.pathsep)
+                env[name] = os.pathsep.join(f for f in folders if f and not _same_path(f).startswith(inside))
+            elif name.startswith(("_PYI", "_MEI")) or inside in _same_path(value):
+                del env[name]
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     if sys.prefix != sys.base_prefix:  # etlwarden runs inside a virtual environment
         for name in ("VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "PYTHONHOME"):
             env.pop(name, None)

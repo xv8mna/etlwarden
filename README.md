@@ -17,6 +17,18 @@ The job list is a SQLite file in the data folder: `%LOCALAPPDATA%\etlwarden` on 
 
 ## Install
 
+### Download for Windows (no Python needed)
+
+1. Download `etlwarden-0.1.0-windows-x64.zip` from the [latest release](https://github.com/xv8mna/etlwarden/releases/latest).
+2. Unzip it into a folder of your choice, for example `C:\Tools\etlwarden`.
+3. Start `etlwarden.exe`.
+
+The program isn't signed with a paid certificate, so Windows may say it protected your PC from an unknown app. Click **More info**, then **Run anyway**. At work, your IT department may have to allow it first.
+
+For the command line, the download has `etlwarden-console.exe`, for example `etlwarden-console status`. Python jobs still need Python installed, and TAFL, Lua, KNIME and Apache Hop jobs need their own programs.
+
+### From the source code
+
 You need Python 3.10 or newer from [python.org](https://www.python.org/downloads/). Get the code with `git clone https://github.com/xv8mna/etlwarden.git`, or download it as a ZIP from GitHub and unpack it. Then, in that folder:
 
 ```powershell
@@ -61,7 +73,8 @@ A batch file counts as failed when it ends with a non-zero exit code (ERRORLEVEL
 
 1. Press Win+R, type `shell:startup` and press Enter. A folder opens.
 2. Right-click in it, choose **New > Shortcut**, and enter this, with the folder changed to where your copy of etlwarden is. Keep the quotes; they matter when the path has spaces.
-   `"C:\Tools\etlwarden\.venv\Scripts\pythonw.exe" -m etlwarden engine`
+   - Download: `"C:\Tools\etlwarden\etlwarden.exe" engine`
+   - From the source code: `"C:\Tools\etlwarden\.venv\Scripts\pythonw.exe" -m etlwarden engine`
 3. Name the shortcut "etlwarden engine".
 
 If an engine is already running, a second one notices and quits, so this can't start your jobs twice.
@@ -71,15 +84,15 @@ To keep jobs running while nobody is logged on, for example on a server, use Tas
 1. Open Task Scheduler and choose **Create Task** (not "Create Basic Task").
 2. **General:** select "Run whether user is logged on or not".
 3. **Triggers:** add one that starts the task "At startup".
-4. **Actions:** start the program `C:\Tools\etlwarden\.venv\Scripts\pythonw.exe` with the arguments `-m etlwarden --data-dir C:\etlwarden-data engine`. Use a data folder that the task's user can write to.
+4. **Actions:** start the program `C:\Tools\etlwarden\etlwarden.exe` with the arguments `--data-dir C:\etlwarden-data engine`. From the source code, start `C:\Tools\etlwarden\.venv\Scripts\pythonw.exe` with `-m etlwarden --data-dir C:\etlwarden-data engine` instead. Use a data folder that the task's user can write to.
 5. **Conditions:** untick "Start the task only if the computer is on AC power".
 6. **Settings:** untick "Stop the task if it runs longer than" (by default Windows stops it after 3 days), and tick "If the task fails, restart every 1 minute".
 
-Open the window with the same data folder, `.venv\Scripts\etlwarden --data-dir C:\etlwarden-data`, and check with `.venv\Scripts\etlwarden --data-dir C:\etlwarden-data status`. A task that runs while nobody is logged on can't see mapped drive letters such as `Z:`, so give job files and the paths inside jobs as network paths like `\\server\share\...`.
+Open the window with the same data folder (`etlwarden.exe --data-dir C:\etlwarden-data`), and check with `etlwarden-console.exe --data-dir C:\etlwarden-data status`. A task that runs while nobody is logged on can't see mapped drive letters such as `Z:`, so give job files and the paths inside jobs as network paths like `\\server\share\...`.
 
 ## Command line
 
-Run these from the project folder as `.venv\Scripts\etlwarden ...`, or activate the virtual environment first.
+With the download, run them as `etlwarden-console ...` in its folder. From the source code, run them in the project folder as `.venv\Scripts\etlwarden ...`, or activate the virtual environment first.
 
 | Command | What it does |
 |---|---|
@@ -109,10 +122,11 @@ etlwarden/
   cli.py        the etlwarden command
 examples/
   hello.py      a tiny job to try things with
+packaging/      how the Windows download is built
 tests/          the automated tests (see below)
 ```
 
-To work on etlwarden itself, install the test tools with `.venv\Scripts\python -m pip install -e ".[dev]"` and run `.venv\Scripts\python -m pytest`.
+To work on etlwarden itself, install the test tools with `.venv\Scripts\python -m pip install -e ".[dev]"` and run `.venv\Scripts\python -m pytest`. To build the Windows download, install the build tools with `.venv\Scripts\python -m pip install -e ".[build]"` and run `.venv\Scripts\python packaging\build.py`. The zip ends up in `dist`.
 
 ## Not there yet
 

@@ -160,6 +160,31 @@ def test_jobs_do_not_inherit_etlwarden_own_virtual_environment(monkeypatch, tmp_
     assert env["PYTHONIOENCODING"] == "utf-8"
 
 
+def test_jobs_do_not_inherit_the_standalone_exe_settings(monkeypatch, tmp_path):
+    bundle = tmp_path / "etlwarden" / "_internal"
+    elsewhere = tmp_path / "tools"
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    monkeypatch.setenv("QT_PLUGIN_PATH", str(bundle / "PySide6" / "plugins"))
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", str(bundle))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bundle), str(elsewhere)]))
+
+    env = runners.job_environment()
+
+    assert "QT_PLUGIN_PATH" not in env
+    assert "_PYI_APPLICATION_HOME_DIR" not in env
+    assert env["PATH"].split(os.pathsep) == [str(elsewhere)]
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"  # a frozen tafl.exe starts fresh
+
+
+def test_the_standalone_exe_asks_for_python_when_none_is_installed(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    job = tmp_path / "job.py"
+    job.write_text("")
+    with pytest.raises(runners.RunnerError, match="Install Python"):
+        runners.build_command("python", job, {})
+
+
 def test_the_default_python_is_outside_etlwarden_own_environment():
     python = Path(runners.default_python())
     assert python.exists()

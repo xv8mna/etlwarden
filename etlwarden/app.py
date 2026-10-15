@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTime, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFontDatabase, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFontDatabase, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -640,7 +640,8 @@ class SettingsDialog(QDialog):
         self.keep_spin.setSuffix(" runs per job")
         self.tafl_edit = _program_edit(settings["tafl_path"], "tafl", "tafl.exe, needed for TAFL jobs")
         self.python_edit = QLineEdit(settings["python_path"])
-        self.python_edit.setPlaceholderText(f"Default: {runners.default_python()}")
+        python = runners.default_python()
+        self.python_edit.setPlaceholderText(f"Default: {python}" if python else "python.exe, needed for Python jobs")
         self.lua_edit = _program_edit(settings["lua_path"], "lua", "lua.exe, needed for Lua jobs")
         self.knime_edit = QLineEdit(settings["knime_path"])
         self.knime_edit.setPlaceholderText("knime.exe, needed for KNIME jobs")
@@ -815,9 +816,19 @@ def _result(run: Run | None, now: float) -> tuple[str, str]:
     return f"{text} · {textfmt.when(run.finished_at or run.queued_at, now)}", color
 
 
+ICON = Path(__file__).with_name("icon.png")
+
+
 def main(data: DataDir) -> int:
+    if sys.platform == "win32":
+        # Its own taskbar button and icon, instead of being grouped with python.exe.
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("etlwarden")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("etlwarden")
+    if ICON.exists():
+        app.setWindowIcon(QIcon(str(ICON)))
     window = MainWindow(data)
     window.show()
     return app.exec()
