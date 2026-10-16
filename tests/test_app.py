@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QEvent, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialogButtonBox  # noqa: E402
 
 from etlwarden import app as app_module  # noqa: E402
@@ -13,10 +13,18 @@ from etlwarden import schedule as sched  # noqa: E402
 from etlwarden.app import JobDialog, MainWindow  # noqa: E402
 from etlwarden.db import Database  # noqa: E402
 
+# One Qt application for the whole test run: if it went away while windows still
+# existed, Qt would crash as Python exits, and the test run would count as failed.
+_QT = QApplication.instance() or QApplication([])
 
-@pytest.fixture(scope="module")
+
+@pytest.fixture
 def qapp():
-    return QApplication.instance() or QApplication([])
+    yield _QT
+    for widget in QApplication.topLevelWidgets():  # what the test left open
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def test_the_window_shows_jobs_and_their_history(qapp, data, script):
