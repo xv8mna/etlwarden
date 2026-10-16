@@ -238,7 +238,7 @@ class Worker(threading.Thread):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         header = (f"Job:     {self.job.name}\n"
                   f"Command: {runners.display(self.command)}\n"
-                  f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n").encode("utf-8")
+                  f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n").encode()
         with open(self.log_path, "wb") as output:
             output.write(header)
             output.flush()

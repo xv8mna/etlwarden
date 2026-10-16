@@ -1,5 +1,7 @@
 # etlwarden
 
+[![tests](https://github.com/xv8mna/etlwarden/actions/workflows/tests.yml/badge.svg)](https://github.com/xv8mna/etlwarden/actions/workflows/tests.yml)
+
 Pick a file, set a time, and it runs in the background.
 
 etlwarden runs your ETL jobs on a schedule: TAFL projects, Python and Lua scripts, KNIME workflows, Apache Hop workflows and pipelines, and programs or batch files. You choose the file and when it runs in a small window. A background engine does the running and keeps a history, with a log of everything each run printed.
@@ -124,13 +126,14 @@ examples/
   hello.py      a tiny job to try things with
 packaging/      how the Windows download is built
 tests/          the automated tests (see below)
+.github/        the GitHub workflow that checks and tests every upload
 ```
 
-To work on etlwarden itself, install the test tools with `.venv\Scripts\python -m pip install -e ".[dev]"` and run `.venv\Scripts\python -m pytest`. To build the Windows download, install the build tools with `.venv\Scripts\python -m pip install -e ".[build]"` and run `.venv\Scripts\python packaging\build.py`. The zip ends up in `dist`.
+To work on etlwarden itself, install the test tools with `.venv\Scripts\python -m pip install -e ".[dev]"`. Then `.venv\Scripts\python -m ruff check etlwarden tests examples packaging` checks the code and `.venv\Scripts\python -m pytest` runs the tests. GitHub does both on every upload, on Windows with Python 3.10, 3.12 and 3.14; the badge at the top shows the result. To build the Windows download, install the build tools with `.venv\Scripts\python -m pip install -e ".[build]"` and run `.venv\Scripts\python packaging\build.py`. The zip ends up in `dist`.
 
 ## Not there yet
 
-- It has been tested on Windows 10 with Python 3.14. Linux and macOS should work but haven't been tried, and there a job keeps running if the engine is killed hard.
+- It's tested on Windows only: on Windows 10 by hand, and on every upload by GitHub with Python 3.10, 3.12 and 3.14. Linux and macOS should work but haven't been tried, and there a job keeps running if the engine is killed hard.
 - TAFL jobs have been tried with the real TAFL. The KNIME and Apache Hop commands follow their documentation, and Lua jobs are a plain `lua script.lua`, but none of these three has been tried with a real installation yet.
 - Jobs start on a schedule or with Run now. There's no "when a file arrives" or "after another job" yet.
 - Nothing notifies you when a job fails. Check the history.

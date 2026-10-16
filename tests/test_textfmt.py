@@ -36,13 +36,13 @@ def test_duration(seconds, text):
 
 
 def test_decode_output_prefers_utf8_and_never_fails():
-    assert textfmt.decode_output("Grüße".encode("utf-8")) == "Grüße"
+    assert textfmt.decode_output("Grüße".encode()) == "Grüße"
     assert len(textfmt.decode_output(b"\xe4")) == 1  # not UTF-8: falls back instead of raising
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the console (OEM) code page only exists on Windows")
 def test_decode_output_reads_console_output_line_by_line():
-    header = "Job:     Größe\n".encode("utf-8")
+    header = "Job:     Größe\n".encode()
     console = "Größe Übersicht\r\n".encode("oem")  # what cmd.exe and console tools print
     assert textfmt.decode_output(header + console) == "Job:     Größe\nGröße Übersicht\r\n"
 

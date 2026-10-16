@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific behaviour")
-
 from etlwarden import engine as engine_module
 from etlwarden import schedule as sched
 from etlwarden.db import Database
 from etlwarden.engine import Engine
 from etlwarden.lock import AlreadyRunning, SingleInstance
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific behaviour")
 
 
 def make_engine(data) -> Engine:
