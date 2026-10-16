@@ -35,6 +35,7 @@ POLL_SECONDS = 5.0
 # was missed: the engine wasn't running, or the computer was off or asleep.
 MISSED_AFTER_SECONDS = 120.0
 PRUNE_EVERY_SECONDS = 3600.0
+HEARTBEAT_SECONDS = 5.0
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -58,6 +59,10 @@ class Engine:
     def run_forever(self) -> None:
         self.recover()
         self.db.reset_engine_stop()
+        # The heartbeat has its own thread, so a slow look at the job list (a network
+        # folder that takes 20 seconds to answer) doesn't make the window think we stopped.
+        beating = threading.Thread(target=self._beat, name="heartbeat", daemon=True)
+        beating.start()
         try:
             while not self._stop.is_set():
                 try:
@@ -69,7 +74,17 @@ class Engine:
                     break
                 self._stop.wait(self.poll_seconds)
         finally:
+            self._stop.set()
+            beating.join(timeout=10)
             self.shutdown()
+
+    def _beat(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.db.engine_beat(os.getpid(), self.started_at, self.clock())
+            except Exception:
+                log.exception("Couldn't write the heartbeat")
+            self._stop.wait(min(self.poll_seconds, HEARTBEAT_SECONDS))
 
     def stop(self) -> None:
         self._stop.set()
@@ -91,13 +106,17 @@ class Engine:
 
     def recover(self) -> None:
         """Tidy up after an engine that stopped: its running jobs were stopped with it
-        (Windows ends them together), and scheduled runs still waiting in its queue are
-        dropped for jobs that have catching up switched off."""
+        (Windows ends them together), drive letters it mapped for them are removed, and
+        scheduled runs that waited in its queue too long are dropped for jobs that have
+        catching up switched off."""
         now = self.clock()
+        for drive, share in self.db.drives_of_running_runs():
+            if runners.remove_leftover_drive(drive, share):
+                log.info("Removed drive letter %s (%s) left by a previous engine", drive, share)
         count = self.db.mark_interrupted(now)
         if count:
             log.warning("Marked %d run(s) from a previous engine as interrupted", count)
-        count = self.db.skip_stale_queued(now)
+        count = self.db.skip_stale_queued(now, older_than=MISSED_AFTER_SECONDS)
         if count:
             log.info("Skipped %d run(s) left waiting by a previous engine (catching up is off)", count)
 
@@ -129,13 +148,19 @@ class Engine:
             missed = now - job.next_run > MISSED_AFTER_SECONDS
             started_by = "catch-up" if missed else "schedule"
             message = None
+            active = self.db.active_status(job.id)
             if missed and not job.catch_up:
                 status = "skipped"
                 message = (f"Missed the run at {textfmt.when(job.next_run, now)}"
                            " and catching up is off for this job.")
-            elif self.db.has_active_run(job.id):
-                status = "skipped"
-                message = "The previous run hadn't finished yet."
+            elif active == "queued" and missed:
+                # A run left waiting in the queue already is the catch-up; nothing to add.
+                self.db.set_next_run(job.id, next_run)
+                continue
+            elif active == "queued":
+                status, message = "skipped", "This job was already waiting in the queue."
+            elif active == "running":
+                status, message = "skipped", "The previous run hadn't finished yet."
             else:
                 status = "queued"
             self.db.record_due(job.id, next_run, started_by, status, message=message, now=now)
@@ -162,15 +187,11 @@ class Engine:
             job = self.db.get_job(run.job_id)
             if job is None:
                 continue
-            try:
-                command = runners.build_command(job.kind, job.path, settings)
-            except runners.RunnerError as exc:
-                self.db.finish_run(run.id, "failed", message=str(exc), now=now)
-                log.warning("%s: can't start: %s", job.name, exc)
-                continue
+            # Everything that touches the job's file happens in the worker, so a slow
+            # network folder can't hold up this loop.
             log_path = self.data.run_log(job.id, run.id)
             self.db.mark_running(run.id, str(log_path), now)
-            worker = Worker(self.db, run, job, command, log_path, self.clock)
+            worker = Worker(self.db, run, job, settings, log_path, self.clock)
             self._workers[run.id] = worker
             worker.start()
             free_slots -= 1
@@ -198,7 +219,7 @@ class Worker(threading.Thread):
         db: Database,
         run: Run,
         job: Job,
-        command: list[str],
+        settings: dict[str, str],
         log_path: Path,
         clock: Callable[[], float],
     ) -> None:
@@ -206,7 +227,7 @@ class Worker(threading.Thread):
         self.db = db
         self.run_id = run.id
         self.job = job
-        self.command = command
+        self.settings = settings
         self.log_path = log_path
         self.clock = clock
         self.tree: runners.ProcessTree | None = None
@@ -236,21 +257,30 @@ class Worker(threading.Thread):
 
     def _run_job(self) -> tuple[str, int | None, str | None]:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        started = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            command = runners.build_command(self.job.kind, self.job.path, self.settings)
+        except runners.RunnerError as exc:
+            self.log_path.write_text(f"Job:     {self.job.name}\nStarted: {started}\n\n{exc}\n", encoding="utf-8")
+            return "failed", None, str(exc)
         header = (f"Job:     {self.job.name}\n"
-                  f"Command: {runners.display(self.command)}\n"
-                  f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n").encode()
+                  f"Command: {runners.display(command)}\n"
+                  f"Started: {started}\n\n").encode()
         with open(self.log_path, "wb") as output:
             output.write(header)
             output.flush()
             path = Path(self.job.path)
-            self.tree = runners.start(self.command, path if path.is_dir() else path.parent, output)
+            self.tree = runners.start(
+                command, path if path.is_dir() else path.parent, output,
+                on_drive_mapped=lambda drive, share: self.db.set_run_drive(self.run_id, drive, share),
+            )
             if self._cancelled.is_set():
                 self.tree.kill()
             status, exit_code, message = self._wait()
         if status == "failed":
             summary = runners.failure_summary(self.job.kind, _output_tail(self.log_path, skip=len(header)))
             if summary:
-                message = f"{message}: {summary[:200]}"
+                message = f"{message}: {runners.shorten(summary, 300)}"
         return status, exit_code, message
 
     def _wait(self) -> tuple[str, int | None, str | None]:

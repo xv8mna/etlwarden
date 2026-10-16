@@ -10,11 +10,12 @@ import os
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTime, QTimer, QUrl
+from PySide6.QtCore import QEvent, QObject, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFontDatabase, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -48,6 +49,7 @@ from PySide6.QtWidgets import (
 from . import engine, runners, textfmt
 from . import schedule as sched
 from .db import Database, Job, Run, int_setting
+from .lock import AlreadyRunning, SingleInstance
 from .paths import DataDir
 
 REFRESH_MS = 2000
@@ -315,9 +317,7 @@ class MainWindow(QMainWindow):
         if job is None:
             return
         busy = f"“{job.name}” is running or waiting to run. Delete it once it has finished."
-        # Only a running engine can be busy with the job; without one, leftover queue
-        # entries just go with it.
-        if self.db.engine_alive() and self.db.has_active_run(job.id):
+        if self._engine_running() and self.db.has_active_run(job.id):
             QMessageBox.information(self, "Delete job", busy)
             return
         answer = QMessageBox.question(
@@ -325,12 +325,35 @@ class MainWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        # Check again in the same step as deleting: the engine may have started it meanwhile.
-        if not self.db.delete_job(job.id, only_if_idle=self.db.engine_alive()):
+        # Decide by the engine's lock, not its heartbeat, which can lag behind. With an engine,
+        # check again in the same step as deleting, since it may have started the job meanwhile.
+        # Without one, leftover queue entries just go with the job; holding the lock meanwhile
+        # keeps an engine from starting in between.
+        lock = SingleInstance(self.data.engine_lock)
+        try:
+            lock.acquire()
+        except AlreadyRunning:
+            deleted = self.db.delete_job(job.id, only_if_idle=True)
+        else:
+            try:
+                deleted = self.db.delete_job(job.id)
+            finally:
+                lock.release()
+        if not deleted:
             QMessageBox.information(self, "Delete job", busy)
             return
         shutil.rmtree(self.data.job_logs(job.id), ignore_errors=True)
         self.refresh()
+
+    def _engine_running(self) -> bool:
+        """Whether an engine runs for this data folder, judged by its lock."""
+        lock = SingleInstance(self.data.engine_lock)
+        try:
+            lock.acquire()
+        except AlreadyRunning:
+            return True
+        lock.release()
+        return False
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self, self.db.settings(), self.data)
@@ -407,6 +430,7 @@ class JobDialog(QDialog):
         self.hint_label.hide()
 
         self.kind_combo = QComboBox()
+        self.kind_combo.addItem("Choose the type…", None)  # until a known file is picked
         for kind, (label, _command) in runners.KINDS.items():
             self.kind_combo.addItem(label, kind)
 
@@ -537,8 +561,8 @@ class JobDialog(QDialog):
         if path is None:
             return
         kind = runners.kind_from_name(path)
-        if kind:
-            self.kind_combo.setCurrentIndex(self.kind_combo.findData(kind))
+        # An ending etlwarden doesn't know asks for the type instead of keeping an old guess.
+        self.kind_combo.setCurrentIndex(self.kind_combo.findData(kind) if kind else 0)
         self._suggest_name(path.stem if kind else path.name)
         self._disk_check.start()
 
@@ -618,6 +642,8 @@ class JobDialog(QDialog):
             return "That file doesn't exist."
         if path.is_dir() and not (self.kind_combo.currentData() == "knime" and runners.is_knime_workflow(path)):
             return "A folder only works as a KNIME workflow folder, with workflow.knime inside."
+        if self.kind_combo.currentData() is None:
+            return "Choose the type of this job."
         try:
             sched.validate(self.schedule())
         except sched.ScheduleError as exc:
@@ -638,11 +664,11 @@ class SettingsDialog(QDialog):
         self.keep_spin.setRange(10, 100_000)
         self.keep_spin.setValue(int_setting(settings, "keep_runs"))
         self.keep_spin.setSuffix(" runs per job")
-        self.tafl_edit = _program_edit(settings["tafl_path"], "tafl", "tafl.exe, needed for TAFL jobs")
+        self.tafl_edit = QLineEdit(settings["tafl_path"])
         self.python_edit = QLineEdit(settings["python_path"])
-        python = runners.default_python()
-        self.python_edit.setPlaceholderText(f"Default: {python}" if python else "python.exe, needed for Python jobs")
-        self.lua_edit = _program_edit(settings["lua_path"], "lua", "lua.exe, needed for Lua jobs")
+        self.lua_edit = QLineEdit(settings["lua_path"])
+        for edit in (self.tafl_edit, self.python_edit, self.lua_edit):
+            edit.setPlaceholderText("Looking for it on this computer…")
         self.knime_edit = QLineEdit(settings["knime_path"])
         self.knime_edit.setPlaceholderText("knime.exe, needed for KNIME jobs")
         self.hop_edit = QLineEdit(settings["hop_run_path"])
@@ -660,9 +686,13 @@ class SettingsDialog(QDialog):
         python_note.setStyleSheet(f"color: {GRAY}")
         note = QLabel("The engine picks up changes within a few seconds.")
         note.setStyleSheet(f"color: {GRAY}")
+        self.error_label = QLabel()
+        self.error_label.setStyleSheet(f"color: {RED}")
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
 
         programs = "Programs (*.exe);;All files (*)"
@@ -678,7 +708,44 @@ class SettingsDialog(QDialog):
             self.hop_edit, "Apache Hop's hop-run", "hop-run (hop-run.bat hop-run.sh);;All files (*)")))
         form.addRow("Data folder", _row(folder, open_folder, stretch=True))
         form.addRow(note)
+        form.addRow(self.error_label)
         form.addRow(buttons)
+
+        self._found = _Found(self)
+        self._found.ready.connect(self.show_found)
+        threading.Thread(target=self._look_for_programs, name="find-programs", daemon=True).start()
+
+    def _look_for_programs(self) -> None:
+        # This walks PATH, and a folder on a network share that's offline can take 20 seconds
+        # to answer, so it runs beside the window instead of freezing it.
+        found = {
+            "tafl": runners.find_tool("tafl"),
+            "python": runners.default_python(),
+            "lua": runners.find_tool("lua"),
+        }
+        try:
+            self._found.ready.emit(found)
+        except RuntimeError:
+            pass  # the dialog was closed meanwhile
+
+    def show_found(self, found: dict) -> None:
+        """Show the programs etlwarden uses when a field is left empty."""
+        for key, edit, needed in (
+            ("tafl", self.tafl_edit, "tafl.exe, needed for TAFL jobs"),
+            ("python", self.python_edit, "python.exe, needed for Python jobs"),
+            ("lua", self.lua_edit, "lua.exe, needed for Lua jobs"),
+        ):
+            edit.setPlaceholderText(f"Default: {found[key]}" if found.get(key) else needed)
+
+    def _accept(self) -> None:
+        for label, edit in (("TAFL", self.tafl_edit), ("Python", self.python_edit), ("Lua", self.lua_edit),
+                            ("KNIME", self.knime_edit), ("Apache Hop", self.hop_edit)):
+            path = _program_path(edit.text())
+            if path and not Path(path).is_file():
+                self.error_label.setText(f"{label}: there's no program at {path}.")
+                self.error_label.show()
+                return
+        self.accept()
 
     def _browse(self, edit: QLineEdit, title: str, file_filter: str) -> QPushButton:
         button = QPushButton("Browse…")
@@ -695,12 +762,18 @@ class SettingsDialog(QDialog):
         return {
             "max_parallel": self.parallel_spin.value(),
             "keep_runs": self.keep_spin.value(),
-            "tafl_path": _unquoted(self.tafl_edit.text()),
-            "python_path": _unquoted(self.python_edit.text()),
-            "lua_path": _unquoted(self.lua_edit.text()),
-            "knime_path": _unquoted(self.knime_edit.text()),
-            "hop_run_path": _unquoted(self.hop_edit.text()),
+            "tafl_path": _program_path(self.tafl_edit.text()),
+            "python_path": _program_path(self.python_edit.text()),
+            "lua_path": _program_path(self.lua_edit.text()),
+            "knime_path": _program_path(self.knime_edit.text()),
+            "hop_run_path": _program_path(self.hop_edit.text()),
         }
+
+
+class _Found(QObject):
+    """Carries the programs found in the background over to the window's thread."""
+
+    ready = Signal(dict)
 
 
 class LogDialog(QDialog):
@@ -772,18 +845,15 @@ def _row(*widgets: QWidget, stretch: bool = False) -> QHBoxLayout:
     return layout
 
 
-def _program_edit(value: str, program: str, needed_for: str) -> QLineEdit:
-    """A path field for a program that may already be on PATH."""
-    edit = QLineEdit(value)
-    names = [f"{program}.exe"] if sys.platform == "win32" else [program]
-    found = runners.find_program(names)
-    edit.setPlaceholderText(f"Default: {found}" if found else needed_for)
-    return edit
-
-
 def _unquoted(text: str) -> str:
     """A pasted path without spaces around it or the quotes Explorer's "Copy as path" adds."""
     return text.strip().strip('"').strip()
+
+
+def _program_path(text: str) -> str:
+    """A program path from Settings, with %VARIABLES% and ~ filled in."""
+    text = _unquoted(text)
+    return os.path.expanduser(os.path.expandvars(text)) if text else ""
 
 
 def _selected_id(table: QTableWidget) -> int | None:
@@ -820,8 +890,9 @@ ICON = Path(__file__).with_name("icon.png")
 
 
 def main(data: DataDir) -> int:
-    if sys.platform == "win32":
+    if sys.platform == "win32" and not getattr(sys, "frozen", False):
         # Its own taskbar button and icon, instead of being grouped with python.exe.
+        # The standalone etlwarden.exe has its own already, and pins to it work as usual.
         import ctypes
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("etlwarden")

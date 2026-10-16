@@ -93,6 +93,29 @@ def test_a_tafl_failure_names_the_table_step_and_error():
     assert runners.failure_summary("tafl", plain).startswith("Orders › 1. Import orders.csv")
 
 
+def test_a_long_tafl_step_is_shortened_but_its_error_is_kept():
+    columns = ", ".join(f"Column {n}" for n in range(40))
+    output = f"Orders\n  ✗ 3. Keep {columns}\n          Column 'Kunde' doesn't exist\n"
+
+    summary = runners.failure_summary("tafl", output)
+
+    assert summary.startswith("Orders › 3. Keep Column 0, ")
+    assert summary.endswith("…: Column 'Kunde' doesn't exist")
+    assert len(summary) < 130
+
+
+@pytest.mark.parametrize("program", ["lua", r"C:\Program Files\Lua\lua54.exe", "/usr/bin/luajit"])
+def test_a_lua_failure_shows_the_error_not_the_traceback(program):
+    output = (
+        "Loading orders\n"
+        f"{program}: job.lua:3: attempt to index a nil value (global 'orders')\n"
+        "stack traceback:\n"
+        "        [C]: in ?\n"
+    )
+    assert runners.failure_summary("lua", output) == "job.lua:3: attempt to index a nil value (global 'orders')"
+    assert runners.failure_summary("lua", "Loading orders\nNo orders today\n") == "No orders today"
+
+
 def test_other_failures_show_the_last_line():
     traceback = "Traceback (most recent call last):\n  File 'x.py'\nKeyError: 'Kunde'\n"
     assert runners.failure_summary("python", traceback) == "KeyError: 'Kunde'"
@@ -128,21 +151,14 @@ def test_kind_from_name_never_touches_the_disk():
 
 
 def test_other_programs_start_directly():
-    assert runners.command_line(["python", "job.py"], Path("jobs")) == (["python", "job.py"], Path("jobs"))
+    assert runners.command_line(["python", "job.py"]) == ["python", "job.py"]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe quoting only matters on Windows")
-def test_batch_files_run_through_cmd_with_call_and_quoted_paths():
-    line, cwd = runners.command_line([r"C:\My Tools\hop-run.bat", "--file", r"D:\R&D\c.hwf"], Path(r"C:\My Tools"))
-    assert line == r'cmd.exe /d /s /c "call "C:\My Tools\hop-run.bat" --file "D:\R&D\c.hwf""'
-    assert cwd == Path(r"C:\My Tools")
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe quoting only matters on Windows")
-def test_batch_files_on_a_network_share_switch_there_first():
-    line, cwd = runners.command_line([r"\\server\etl\jobs\load.bat"], Path(r"\\server\etl\jobs"))
-    assert line == r'cmd.exe /d /s /c "pushd "\\server\etl\jobs" && call "\\server\etl\jobs\load.bat""'
-    assert cwd is None
+def test_batch_files_run_through_cmd_with_call_and_quoted_paths(monkeypatch):
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    line = runners.command_line([r"C:\My Tools\hop-run.bat", "--file", r"D:\R&D\c.hwf"])
+    assert line == r'"C:\Windows\System32\cmd.exe" /d /s /c "call "C:\My Tools\hop-run.bat" --file "D:\R&D\c.hwf""'
 
 
 def test_jobs_do_not_inherit_etlwarden_own_virtual_environment(monkeypatch, tmp_path):
@@ -176,9 +192,26 @@ def test_jobs_do_not_inherit_the_standalone_exe_settings(monkeypatch, tmp_path):
     assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"  # a frozen tafl.exe starts fresh
 
 
+def test_the_standalone_exe_settings_are_dropped_under_either_spelling_of_its_folder(monkeypatch, tmp_path):
+    # Started from a mapped drive, the folder is Z:\... in one place and \\server\share\... in another.
+    mapped = tmp_path / "Z" / "etlwarden" / "_internal"
+    real = tmp_path / "share" / "etlwarden" / "_internal"
+    elsewhere = tmp_path / "tools"
+    monkeypatch.setattr(sys, "_MEIPASS", str(mapped), raising=False)
+    monkeypatch.setattr(runners.os.path, "realpath", lambda path, *args, **kwargs: str(real))
+    monkeypatch.setenv("QT_PLUGIN_PATH", str(real / "PySide6" / "plugins"))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(real), str(mapped / "PySide6"), str(elsewhere)]))
+
+    env = runners.job_environment()
+
+    assert "QT_PLUGIN_PATH" not in env
+    assert env["PATH"].split(os.pathsep) == [str(elsewhere)]
+
+
 def test_the_standalone_exe_asks_for_python_when_none_is_installed(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(runners, "_registered_python", lambda: None)  # nothing in the registry either
     job = tmp_path / "job.py"
     job.write_text("")
     with pytest.raises(runners.RunnerError, match="Install Python"):
@@ -193,9 +226,21 @@ def test_the_default_python_is_outside_etlwarden_own_environment():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe quoting only matters on Windows")
-def test_a_batch_path_with_a_caret_goes_without_call():
-    line, _cwd = runners.command_line([r"C:\Q1 ^ Q2\load.bat"], None)
-    assert line == r'cmd.exe /d /s /c ""C:\Q1 ^ Q2\load.bat""'
+def test_a_batch_path_with_a_caret_goes_without_call(monkeypatch):
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    line = runners.command_line([r"C:\Q1 ^ Q2\load.bat"])
+    assert line == r'"C:\Windows\System32\cmd.exe" /d /s /c ""C:\Q1 ^ Q2\load.bat" & call exit /b %^errorlevel%"'
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe only matters on Windows")
+@pytest.mark.parametrize("folder", ["Q1 ^ Q2", "plain"])
+@pytest.mark.parametrize("code", [0, 3])
+def test_a_batch_file_exit_code_comes_through(tmp_path, folder, code):
+    batch = tmp_path / folder / "job.bat"
+    batch.parent.mkdir()
+    batch.write_text(f"@echo off\r\nexit /b {code}\r\n", encoding="ascii")
+    result = subprocess.run(runners.command_line([str(batch)]), cwd=batch.parent, capture_output=True)
+    assert result.returncode == code
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows looks in the current folder first")
@@ -256,8 +301,9 @@ def test_a_batch_job_in_a_network_folder_runs_there_and_leaves_no_drive_letter(t
 
     drives_before = ctypes.windll.kernel32.GetLogicalDrives()
     log = tmp_path / "out.log"
+    mapped = []
     with open(log, "wb") as output:
-        tree = runners.start([str(folder / "read.bat")], folder, output)
+        tree = runners.start([str(folder / "read.bat")], folder, output, lambda *drive: mapped.append(drive))
         try:
             deadline = time.monotonic() + 20
             while "hello" not in log.read_text(errors="replace") and time.monotonic() < deadline:
@@ -268,3 +314,24 @@ def test_a_batch_job_in_a_network_folder_runs_there_and_leaves_no_drive_letter(t
             tree.release()
     assert "hello from the share" in log.read_text(errors="replace")
     assert ctypes.windll.kernel32.GetLogicalDrives() == drives_before
+    [(drive, share)] = mapped
+    assert drive.endswith(":") and share.lower() == folder.drive.lower()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="network folders are about Windows shares here")
+def test_a_drive_letter_left_by_a_crashed_engine_is_removed(tmp_path):
+    folder = _network_path(tmp_path)
+    if not folder.exists():
+        pytest.skip(r"the administrative share \\localhost\C$ isn't available")
+    drive, share, _path = runners._map_network_folder(folder)
+    try:
+        assert not runners.remove_leftover_drive(drive, r"\\elsewhere\share")  # not ours: left alone
+        assert Path(drive + "\\").exists()
+
+        assert runners.remove_leftover_drive(drive, share)
+
+        assert not Path(drive + "\\").exists()
+        assert not runners.remove_leftover_drive(drive, share)  # already gone
+    finally:
+        if Path(drive + "\\").exists():
+            runners._unmap(drive)

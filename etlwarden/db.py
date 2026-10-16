@@ -145,6 +145,11 @@ class Database:
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
                 DEFAULT_SETTINGS.items(),
             )
+            # Columns added after the first release; job lists from 0.1.0 get them here.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+            for column in ("drive", "share"):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -328,12 +333,33 @@ class Database:
 
     def has_active_run(self, job_id: int) -> bool:
         """Whether the job is already waiting in the queue or running."""
+        return self.active_status(job_id) is not None
+
+    def active_status(self, job_id: int) -> str | None:
+        """'running' or 'queued' if the job has such a run (running wins), else None."""
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM runs WHERE job_id = ? AND status IN (?, ?) LIMIT 1",
+                """SELECT status FROM runs WHERE job_id = ? AND status IN (?, ?)
+                   ORDER BY status = 'running' DESC LIMIT 1""",
                 (job_id, *ACTIVE),
             ).fetchone()
-        return row is not None
+        return row["status"] if row else None
+
+    def set_next_run(self, job_id: int, next_run: float | None) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE jobs SET next_run = ? WHERE id = ?", (next_run, job_id))
+
+    def set_run_drive(self, run_id: int, drive: str, share: str) -> None:
+        """Note the drive letter mapped for a run, so a crashed engine's letters can be removed."""
+        with self.connect() as conn:
+            conn.execute("UPDATE runs SET drive = ?, share = ? WHERE id = ?", (drive, share, run_id))
+
+    def drives_of_running_runs(self) -> list[tuple[str, str]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT drive, share FROM runs WHERE status = 'running' AND drive IS NOT NULL"
+            ).fetchall()
+        return [(row["drive"], row["share"]) for row in rows]
 
     def queued_runs(self) -> list[Run]:
         """The queue, oldest first."""
@@ -377,16 +403,18 @@ class Database:
             )
             return cursor.rowcount
 
-    def skip_stale_queued(self, now: float | None = None) -> int:
-        """Scheduled runs left in the queue by a stopped engine are dropped for jobs with
-        catching up switched off. "Run now" requests stay. Returns how many were dropped."""
+    def skip_stale_queued(self, now: float | None = None, older_than: float = 0) -> int:
+        """Scheduled runs that a stopped engine left in the queue for more than `older_than`
+        seconds are dropped for jobs with catching up switched off. "Run now" requests stay.
+        Returns how many were dropped."""
+        now = time.time() if now is None else now
         with self.connect() as conn:
             cursor = conn.execute(
                 """UPDATE runs SET status = 'skipped', finished_at = ?,
                                    message = 'Was waiting in the queue when the engine stopped, and catching up is off for this job.'
-                   WHERE status = 'queued' AND started_by != 'manual'
+                   WHERE status = 'queued' AND started_by != 'manual' AND queued_at < ?
                      AND job_id IN (SELECT id FROM jobs WHERE catch_up = 0)""",
-                (time.time() if now is None else now,),
+                (now, now - older_than),
             )
             return cursor.rowcount
 

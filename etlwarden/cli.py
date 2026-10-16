@@ -7,7 +7,7 @@ import io
 import sys
 import time
 
-from . import __version__, paths, textfmt
+from . import __version__, paths, runners, textfmt
 from . import schedule as sched
 from .db import Database
 from .paths import DataDir, DataDirError
@@ -31,10 +31,11 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(sys.stdout, io.TextIOWrapper):
         # Redirected output uses the Windows code page; never crash on a job name it lacks.
         sys.stdout.reconfigure(errors="replace")
+    runners.forget_bundle_dll_folder()  # also for programs the window opens, such as an editor
     try:
         data = paths.resolve(args.data_dir, create=args.command != "status")
     except DataDirError as exc:
-        print(f"etlwarden: {exc}", file=sys.stderr)
+        _complain(f"etlwarden: {exc}")
         return 2
 
     if args.command == "engine":
@@ -46,6 +47,17 @@ def main(argv: list[str] | None = None) -> int:
     from .app import main as app_main  # PySide6 is only needed for the window
 
     return app_main(data)
+
+
+def _complain(message: str) -> None:
+    """Print an error, or show it in a message box when there's nowhere to print it:
+    etlwarden.exe has no console when it's started from Explorer or a shortcut."""
+    if sys.stderr is not None:
+        print(message, file=sys.stderr)
+    elif sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, "etlwarden", 0x10)  # MB_ICONERROR
 
 
 def print_status(data: DataDir) -> int:

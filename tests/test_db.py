@@ -146,3 +146,30 @@ def test_deleting_only_if_idle_leaves_a_busy_job_alone(data):
     assert db.get_job(job_id) is not None
     assert db.delete_job(job_id)
     assert db.get_job(job_id) is None
+
+
+def test_a_job_list_from_version_0_1_0_gets_the_new_columns(data):
+    db = Database(data.db)
+    job_id = db.add_job("Load", "load.bat", "program", sched.every(15))
+    run_id = db.add_run(job_id, "manual", "queued")
+    with db.connect() as conn:  # as 0.1.0 created it
+        conn.execute("ALTER TABLE runs DROP COLUMN drive")
+        conn.execute("ALTER TABLE runs DROP COLUMN share")
+
+    db = Database(data.db)
+    db.mark_running(run_id, "run.log")
+    db.set_run_drive(run_id, "Z:", r"\\server\etl")
+
+    assert db.drives_of_running_runs() == [("Z:", r"\\server\etl")]
+    assert db.get_run(run_id).status == "running"
+
+
+def test_the_job_list_message_prefers_running_over_waiting(data):
+    db = Database(data.db)
+    job_id = db.add_job("Slow", "slow.py", "python", sched.every(1))
+    assert db.active_status(job_id) is None
+    db.add_run(job_id, "schedule", "queued")
+    assert db.active_status(job_id) == "queued"
+    running = db.add_run(job_id, "schedule", "queued")
+    db.mark_running(running, "run.log")
+    assert db.active_status(job_id) == "running"

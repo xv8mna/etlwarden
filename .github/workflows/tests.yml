@@ -1,6 +1,6 @@
 name: tests
 
-# On every upload: check the code with ruff, then run all tests on Windows.
+# For every change to main and every pull request: check the code with ruff, then run all tests on Windows.
 # There's no lock file, so each run also uses the newest PySide6 and pytest that
 # pyproject.toml allows, and a breaking release shows up here right away.
 

@@ -158,6 +158,7 @@ def test_a_missing_program_path_fails_with_a_clear_message(data, script):
 
     assert run.status == "failed"
     assert "KNIME" in run.message
+    assert "KNIME" in Path(run.log_path).read_text(encoding="utf-8")  # the log says why, too
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="batch files are a Windows thing")
@@ -326,15 +327,78 @@ def test_a_restart_drops_queued_scheduled_runs_when_catching_up_is_off(data, scr
     db = Database(data.db)
     strict = db.add_job("Strict", script("a.py"), "python", sched.every(60), catch_up=False)
     relaxed = db.add_job("Relaxed", script("b.py"), "python", sched.every(60))
-    stale = db.add_run(strict, "schedule", "queued")
-    manual = db.add_run(strict, "manual", "queued")
-    kept = db.add_run(relaxed, "schedule", "queued")
+    an_hour_ago = time.time() - 3600
+    stale = db.add_run(strict, "schedule", "queued", now=an_hour_ago)
+    manual = db.add_run(strict, "manual", "queued", now=an_hour_ago)
+    kept = db.add_run(relaxed, "schedule", "queued", now=an_hour_ago)
+    just_now = db.add_run(strict, "schedule", "queued")  # a quick restart: still on time
 
     Engine(data).recover()
 
     assert db.get_run(stale).status == "skipped"
     assert db.get_run(manual).status == "queued"
     assert db.get_run(kept).status == "queued"
+    assert db.get_run(just_now).status == "queued"
+
+
+def test_a_restart_removes_drive_letters_the_last_engine_left(data, script, monkeypatch):
+    db = Database(data.db)
+    job_id = db.add_job("Load", script("load.bat"), "program", sched.every(60))
+    run_id = db.add_run(job_id, "manual", "queued")
+    db.mark_running(run_id, "run.log")
+    db.set_run_drive(run_id, "Z:", r"\\server\etl")
+    removed = []
+    monkeypatch.setattr(engine_module.runners, "remove_leftover_drive", lambda *drive: removed.append(drive))
+
+    Engine(data).recover()
+
+    assert removed == [("Z:", r"\\server\etl")]
+    assert db.get_run(run_id).status == "interrupted"
+
+
+def test_a_job_already_waiting_in_the_queue_is_not_queued_again(data, script):
+    engine = make_engine(data)
+    engine.db.save_settings({"max_parallel": 1})
+    busy = engine.db.add_job("Busy", script("busy.py", "import time\ntime.sleep(3)"), "python", sched.every(60))
+    waiting = engine.db.add_job("Waiting", script("waiting.py"), "python", sched.every(1))
+    engine.db.request_run(busy)
+    engine.tick()  # Busy takes the only slot
+    engine.tick(engine.db.get_job(waiting).next_run + 1)  # Waiting is due and has to queue
+    assert [run.status for run in engine.db.runs(waiting)] == ["queued"]
+
+    engine.tick(engine.db.get_job(waiting).next_run + 1)  # due again, still in the queue
+    assert [(run.status, run.message) for run in engine.db.runs(waiting)] == [
+        ("skipped", "This job was already waiting in the queue."),
+        ("queued", None),
+    ]
+
+    engine.tick(engine.db.get_job(waiting).next_run + 3600)  # missed: the waiting run is the catch-up
+    assert len(engine.db.runs(waiting)) == 2
+
+    def drained() -> bool:
+        engine.tick()
+        return engine.db.active_status(waiting) is None
+
+    assert wait_for(drained)
+    assert engine.wait_idle(30)
+    assert engine.db.runs(waiting)[-1].status == "ok"
+
+
+def test_the_heartbeat_goes_on_while_the_job_list_is_slow(data, monkeypatch):
+    engine = make_engine(data)
+    slow = threading.Event()
+    monkeypatch.setattr(engine, "tick", lambda now=None: slow.wait(30))  # a network folder that hangs
+    loop = threading.Thread(target=engine.run_forever)
+    loop.start()
+    try:
+        assert wait_for(engine.db.engine_alive, timeout=10)
+        first = engine.db.engine_state()["heartbeat"]
+        assert wait_for(lambda: engine.db.engine_state()["heartbeat"] > first, timeout=10)
+    finally:
+        engine.stop()
+        slow.set()
+        loop.join(10)
+    assert not loop.is_alive()
 
 
 def test_a_broken_schedule_does_not_block_other_jobs(data, script):

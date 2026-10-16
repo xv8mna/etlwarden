@@ -51,9 +51,9 @@ def decode_output(raw: bytes) -> str:
     Otherwise there are two candidates on Windows: batch files and console
     tools print in the console code page (OEM, 850 on German Windows), other
     programs such as KNIME and Hop in the Windows one (ANSI, 1252). The line is
-    read both ways and the more plausible reading wins: common accented
-    letters count double, other letters once, symbols not at all. So "Größe"
-    beats "Gr”áe" and "Verträge" beats "Vertrõge". A tie goes to ANSI.
+    read both ways and the more plausible reading wins (see _plausibility), so
+    "Größe" beats "Gr”áe", "Straße" beats "Straáe", "Verträge" beats "Vertrõge"
+    and "1.234,56 €" beats "1.234,56 Ç". A tie goes to ANSI.
     """
     try:
         return raw.decode("utf-8")
@@ -70,11 +70,35 @@ def _decode_line(line: bytes) -> str:
     return max(readings, key=_plausibility)  # max() keeps the first on a tie
 
 
-_COMMON_ACCENTED = set("äöüÄÖÜßéèêëàáâçñóòôúùûíìîïÉÈÊÀÁÂÇÑÓÒÔÚÙÛÍøØåÅæÆœŒ")
+_COMMON_ACCENTED = set("äöüÄÖÜéèêëàáâçñóòôúùûíìîïÉÈÊÀÁÂÇÑÓÒÔÚÙÛÍøØåÅæÆœŒ")
+# Windows typography (bytes 0x80-0x9F in code page 1252); in the console code page
+# the same bytes are accented letters.
+_TYPOGRAPHY = set("€…–—„“”‘’•‚")
+_AFTER_A_WORD = set("…“”’")  # the ones that normally follow a letter directly
 
 
 def _plausibility(text: str) -> int:
-    return sum(2 if char in _COMMON_ACCENTED else 1 for char in text if not char.isascii() and char.isalpha())
+    """How much a line reads like real text: ß counts 3, common accented letters 2, other
+    letters 1, Windows typography 2 (only where it's normally used), box drawing 3 (the
+    lines of `tree` and similar), and the replacement character � takes 2 off."""
+    score = 0
+    for index, char in enumerate(text):
+        if char.isascii():
+            continue
+        if char == "�":
+            score -= 2
+        elif char == "ß":
+            score += 3
+        elif char in _COMMON_ACCENTED:
+            score += 2
+        elif char in _TYPOGRAPHY:
+            after_letter = index > 0 and text[index - 1].isalpha()
+            score += 2 if not after_letter or char in _AFTER_A_WORD else 0
+        elif "─" <= char <= "╿":
+            score += 3
+        elif char.isalpha():
+            score += 1
+    return score
 
 
 def _ansi_encoding() -> str:

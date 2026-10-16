@@ -66,3 +66,22 @@ def test_decode_output_tells_windows_and_console_text_apart():
 @pytest.mark.parametrize("text", ["Verträge geladen", "März 2026", "Café", "Ölpreis"])
 def test_windows_text_that_is_also_valid_console_text_stays_windows_text(text):
     assert textfmt.decode_output(text.encode("cp1252")) == text
+
+
+@pytest.mark.skipif(not _german_code_pages(), reason="needs the German Windows code pages")
+@pytest.mark.parametrize(
+    "text, code_page",
+    [
+        ("Straße 12", "cp1252"),
+        ("Preis: 5 €", "cp1252"),
+        ("Läuft…", "cp1252"),
+        ("„Bericht“ fertig", "cp1252"),
+        ("Müller – Verträge", "cp1252"),
+        ("Straße 12", "cp850"),
+        ("┌─────┐", "cp850"),
+        ("└─ Größe ─┘", "cp850"),
+        ("Übersicht: 3 Dateien", "cp850"),
+    ],
+)
+def test_german_lines_come_out_right_from_either_code_page(text, code_page):
+    assert textfmt.decode_output(text.encode(code_page)) == text

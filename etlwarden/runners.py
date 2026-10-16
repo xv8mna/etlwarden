@@ -29,10 +29,22 @@ class RunnerError(Exception):
     """A job can't be started, e.g. because a program path isn't set. Shown to people."""
 
 
+# Programs etlwarden looks for on PATH when Settings doesn't name one.
+PROGRAMS = {
+    "tafl": ["tafl"],
+    "lua": ["lua", "lua54", "lua5.4", "luajit"],
+}
+
+
+def find_tool(kind: str) -> str | None:
+    """Where the program for a kind of job is on PATH, e.g. tafl.exe for TAFL projects."""
+    return find_program([f"{name}.exe" if sys.platform == "win32" else name for name in PROGRAMS[kind]])
+
+
 def tafl_command(path: Path, settings: Settings) -> list[str]:
     """`tafl run` calculates all tables of a TAFL project and runs its exports;
     the exit code is 0 when everything worked."""
-    tafl = settings.get("tafl_path") or find_program(["tafl.exe"] if sys.platform == "win32" else ["tafl"])
+    tafl = settings.get("tafl_path") or find_tool("tafl")
     if not tafl:
         raise RunnerError("Set the path to TAFL (tafl.exe) in Settings first.")
     return [tafl, "run", str(path)]
@@ -46,9 +58,7 @@ def python_command(path: Path, settings: Settings) -> list[str]:
 
 
 def lua_command(path: Path, settings: Settings) -> list[str]:
-    lua = settings.get("lua_path") or find_program(
-        [f"{name}.exe" if sys.platform == "win32" else name for name in ("lua", "lua54", "lua5.4", "luajit")]
-    )
+    lua = settings.get("lua_path") or find_tool("lua")
     if not lua:
         raise RunnerError("Set the path to Lua (lua.exe) in Settings first.")
     return [lua, str(path)]
@@ -72,7 +82,12 @@ def hop_command(path: Path, settings: Settings) -> list[str]:
 
 def program_command(path: Path, settings: Settings) -> list[str]:
     if path.suffix.lower() == ".sh":
-        return ["sh", str(path)]
+        if sys.platform != "win32":
+            return ["sh", str(path)]
+        shell = find_program(["sh.exe", "bash.exe"])  # e.g. from Git for Windows
+        if not shell:
+            raise RunnerError("Shell scripts need sh.exe on PATH, for example from Git for Windows.")
+        return [shell, str(path)]
     return [str(path)]
 
 
@@ -102,13 +117,22 @@ SUFFIXES = {
 
 def failure_summary(kind: str, output: str) -> str | None:
     """The part of a failed job's output that best says what went wrong: TAFL's first
-    failed step, or otherwise the last line (for Python, the exception)."""
+    failed step, Lua's error message, or otherwise the last line (for Python, the exception)."""
     if kind == "tafl":
         summary = _tafl_failure(output)
         if summary:
             return summary
     lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if kind == "lua" and "stack traceback:" in lines:
+        # Lua prints the error first and then the traceback, which ends in "[C]: in ?".
+        before = lines[: lines.index("stack traceback:")]
+        if before:
+            return _LUA_PROGRAM.sub("", before[-1], count=1)
     return lines[-1] if lines else None
+
+
+# The "lua: " or "C:\Lua\lua54.exe: " that lua puts in front of its error messages.
+_LUA_PROGRAM = re.compile(r"^(?:[A-Za-z]:)?(?:[^:]*[\\/])?(?:lua|luajit)[\w.]*?(?:\.exe)?: ", re.IGNORECASE)
 
 
 def _tafl_failure(output: str) -> str | None:
@@ -123,11 +147,17 @@ def _tafl_failure(output: str) -> str | None:
         mark, _, step = line.strip().partition(" ")
         if mark not in ("✗", "ERR"):
             continue
+        step = shorten(step.strip(), 80)  # descriptions list every column; the error matters more
         following = lines[index + 1] if index + 1 < len(lines) else ""
         error = following.strip() if following.startswith("      ") else ""
-        where = f"{table} › {step.strip()}" if table else step.strip()
+        where = f"{table} › {step}" if table else step
         return f"{where}: {error}" if error else where
     return None
+
+
+def shorten(text: str, limit: int) -> str:
+    """At most `limit` characters, with … where something was cut off."""
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def detect_kind(path: str | os.PathLike[str]) -> str | None:
@@ -158,31 +188,105 @@ def build_command(kind: str, path: str | os.PathLike[str], settings: Settings) -
 
 def default_python() -> str | None:
     """The Python you get by typing `python` in a new terminal, so jobs find the packages
-    installed there. Falls back to the Python that etlwarden itself was installed with;
-    the standalone etlwarden.exe has none to offer, so there it can be None."""
-    found = find_program(["python.exe"] if sys.platform == "win32" else ["python3", "python"])
-    if found or getattr(sys, "frozen", False):
-        return found
+    installed there: the first python on PATH, including the ones the Python install
+    manager and the Microsoft Store put there. Then the py launcher, then any Python
+    registered with Windows. From the source code, the Python running etlwarden is the
+    last resort; the standalone etlwarden.exe has none of its own, so there it can be None."""
+    names = ["python.exe"] if sys.platform == "win32" else ["python3", "python"]
+    for folder in _path_folders(skip_app_aliases=False):
+        for name in names:
+            candidate = Path(folder) / name
+            if _is_app_alias_folder(folder):
+                # App aliases (Python install manager, Store) are links: ask them where Python
+                # really is. The Store's placeholder for "not installed" answers nothing.
+                if os.path.lexists(candidate) and (real := _python_behind(str(candidate))):
+                    return real
+            elif candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    if sys.platform == "win32":
+        launcher = find_program(["py.exe"])
+        found = (launcher and _python_behind(launcher, "-3")) or _registered_python()
+        if found:
+            return found
+    if getattr(sys, "frozen", False):
+        return None
     base = Path(sys.base_prefix) / ("python.exe" if sys.platform == "win32" else "bin/python3")
     return str(base) if base.exists() else sys.executable
 
 
 def find_program(names: list[str]) -> str | None:
     """The first of `names` on the jobs' PATH, as a full path, or None."""
-    own = _same_path(sys.prefix)
-    for folder in job_environment().get("PATH", "").split(os.pathsep):
-        # Only full paths (Windows would also look in the current folder, which can be
-        # etlwarden's own), not etlwarden's own environment, and not the Microsoft
-        # Store placeholders.
-        if not os.path.isabs(folder) or "windowsapps" in folder.lower():
-            continue
-        if _same_path(folder) == own or _same_path(folder).startswith(own + os.sep):
-            continue
+    for folder in _path_folders(skip_app_aliases=True):
         for name in names:
             candidate = Path(folder) / name
             if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate)
     return None
+
+
+def _path_folders(*, skip_app_aliases: bool) -> list[str]:
+    """The jobs' PATH: only full paths (Windows would also look in the current folder,
+    which can be etlwarden's own) and not etlwarden's own environment."""
+    own = _same_path(sys.prefix)
+    folders = []
+    for folder in job_environment().get("PATH", "").split(os.pathsep):
+        if not os.path.isabs(folder) or (skip_app_aliases and _is_app_alias_folder(folder)):
+            continue
+        if _same_path(folder) == own or _same_path(folder).startswith(own + os.sep):
+            continue
+        folders.append(folder)
+    return folders
+
+
+def _is_app_alias_folder(folder: str) -> bool:
+    return "windowsapps" in folder.lower()
+
+
+_asked: dict[tuple[str, ...], str | None] = {}
+
+
+def _python_behind(*command: str) -> str | None:
+    """Run a Python (or launcher) once and ask it for its real python.exe. Remembered."""
+    if command not in _asked:
+        options = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+        try:
+            result = subprocess.run(
+                [*command, "-c", "import sys; print(sys.executable)"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+                env=job_environment(), **options,
+            )
+            path = result.stdout.strip()
+            _asked[command] = path if result.returncode == 0 and path and Path(path).is_file() else None
+        except (OSError, subprocess.SubprocessError):
+            _asked[command] = None
+    return _asked[command]
+
+
+def _registered_python() -> str | None:
+    """The newest Python that its installer registered with Windows (PEP 514)."""
+    import winreg
+
+    found: list[tuple[tuple[int, ...], str]] = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            core = winreg.OpenKey(hive, r"Software\Python\PythonCore")
+        except OSError:
+            continue
+        with core:
+            for index in range(winreg.QueryInfoKey(core)[0]):
+                version = winreg.EnumKey(core, index)
+                try:
+                    with winreg.OpenKey(core, rf"{version}\InstallPath") as key:
+                        try:
+                            python = winreg.QueryValueEx(key, "ExecutablePath")[0]
+                        except OSError:
+                            python = str(Path(winreg.QueryValueEx(key, "")[0]) / "python.exe")
+                except OSError:
+                    continue
+                numbers = tuple(int(n) for n in re.findall(r"\d+", version)[:2])
+                if python and Path(python).is_file():
+                    found.append((numbers, python))
+    return max(found)[1] if found else None
 
 
 def job_environment() -> dict[str, str]:
@@ -193,13 +297,18 @@ def job_environment() -> dict[str, str]:
     if bundle:
         # The standalone etlwarden.exe sets variables that point into its own folder (Qt
         # plugins, PyInstaller's bookkeeping). Jobs must not see them, and a job that is
-        # itself a PyInstaller program (a frozen tafl.exe, say) has to start fresh.
-        inside = _same_path(bundle)
+        # itself a PyInstaller program (a frozen tafl.exe, say) has to start fresh. The
+        # folder can be spelled two ways, e.g. Z:\... and \\server\share\... for a mapped drive.
+        spellings = {_same_path(bundle), _same_path(os.path.realpath(bundle))}
+
+        def inside(value: str) -> bool:
+            value = _same_path(value)
+            return any(value == s or value.startswith(s + os.sep) for s in spellings)
+
         for name, value in list(env.items()):
             if name.upper() == "PATH":
-                folders = value.split(os.pathsep)
-                env[name] = os.pathsep.join(f for f in folders if f and not _same_path(f).startswith(inside))
-            elif name.startswith(("_PYI", "_MEI")) or inside in _same_path(value):
+                env[name] = os.pathsep.join(f for f in value.split(os.pathsep) if f and not inside(f))
+            elif name.startswith(("_PYI", "_MEI")) or any(s in _same_path(value) for s in spellings):
                 del env[name]
         env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     if sys.prefix != sys.base_prefix:  # etlwarden runs inside a virtual environment
@@ -211,23 +320,34 @@ def job_environment() -> dict[str, str]:
     return env
 
 
-def start(command: list[str], cwd: Path, output: IO[bytes]) -> ProcessTree:
-    """Start a job without a window, writing everything it prints into `output`."""
+def start(
+    command: list[str],
+    cwd: Path,
+    output: IO[bytes],
+    on_drive_mapped: Callable[[str, str], None] | None = None,
+) -> ProcessTree:
+    """Start a job without a window, writing everything it prints into `output`.
+
+    A batch file in a network folder gets a drive letter for the time it runs; it's
+    passed to `on_drive_mapped(letter, share)` so a crashed engine can remove it later.
+    """
     options: dict = {}
     drive = None
     if sys.platform == "win32":
+        forget_bundle_dll_folder()
         # Suspended until it's in its job object, so nothing it starts can slip out.
         options["creationflags"] = (
             subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
         )
         if _is_batch(command) and _is_network_path(cwd):
-            drive, cwd = _map_network_folder(cwd)
+            drive, share, cwd = _map_network_folder(cwd)
+            if on_drive_mapped:
+                on_drive_mapped(drive, share)
     else:
         options["start_new_session"] = True  # its own process group, so kill() reaches its children
-    args, cwd = command_line(command, cwd)
     try:
         process = subprocess.Popen(
-            args,
+            command_line(command),
             cwd=cwd,
             env=job_environment(),
             stdin=subprocess.DEVNULL,
@@ -235,30 +355,43 @@ def start(command: list[str], cwd: Path, output: IO[bytes]) -> ProcessTree:
             stderr=subprocess.STDOUT,
             **options,
         )
+        return ProcessTree(process, drive)
     except BaseException:
         _unmap(drive)
         raise
-    return ProcessTree(process, drive)
 
 
-def command_line(command: list[str], cwd: Path | None = None) -> tuple[list[str] | str, Path | None]:
-    """What to hand to Popen, and the folder to start in.
+def command_line(command: list[str]) -> list[str] | str:
+    """What to hand to Popen.
 
-    Windows runs .bat and .cmd files through cmd.exe, which needs care: paths
-    are quoted, so folders like R&D work; `call` makes cmd return the batch
-    file's own exit code, so errors aren't recorded as OK; and cmd can't start
-    in a network folder (\\\\server\\share). start() maps such a folder to a
-    drive letter first; if that fails, cmd switches there itself with pushd.
+    Windows runs .bat and .cmd files through cmd.exe, which needs care: cmd.exe is
+    named with its full path, so no other cmd.exe can stand in; paths are quoted, so
+    folders like R&D work; and `call` makes cmd return the batch file's own exit code,
+    so errors aren't recorded as OK. `call` doubles every ^ inside quotes, so a path with
+    ^ in it runs without, and an explicit `exit /b` keeps its exit code instead.
     """
     if sys.platform != "win32" or not _is_batch(command):
-        return command, cwd
+        return command
     parts = " ".join(_cmd_quote(part) for part in [f'"{command[0]}"', *command[1:]])
-    # `call` doubles every ^ inside quotes, so a path with ^ in it goes without.
-    line = parts if "^" in "".join(command) else f"call {parts}"
-    if _is_network_path(cwd):
-        line = f'pushd "{cwd}" && {line}'
-        cwd = None
-    return f'cmd.exe /d /s /c "{line}"', cwd
+    line = f"{parts} & call exit /b %^errorlevel%" if "^" in "".join(command) else f"call {parts}"
+    return f'"{_system_program("cmd.exe")}" /d /s /c "{line}"'
+
+
+def _system_program(name: str) -> str:
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", name)
+
+
+_dll_folder_forgotten = False
+
+
+def forget_bundle_dll_folder() -> None:
+    """The standalone etlwarden.exe tells Windows to look for DLLs in its own folder first,
+    and every program it starts would inherit that. Jobs (and the programs they start,
+    such as sqlcmd) must find their DLLs as usual, so undo it once everything is loaded."""
+    global _dll_folder_forgotten
+    if sys.platform == "win32" and getattr(sys, "frozen", False) and not _dll_folder_forgotten:
+        _kernel32.SetDllDirectoryW(None)
+        _dll_folder_forgotten = True
 
 
 def _is_batch(command: list[str]) -> bool:
@@ -300,10 +433,17 @@ class ProcessTree:
         self._drive = drive  # a drive letter mapped for a batch job in a network folder
         self._job = None
         if sys.platform == "win32":
+            job = None
             try:
-                self._job = _job_object_for(process)
+                job = _job_object_for(process)
             finally:
-                _resume(process)  # start() created it suspended
+                try:
+                    _resume(process)  # start() created it suspended
+                except BaseException:
+                    if job:
+                        _kernel32.CloseHandle(job)
+                    raise
+            self._job = job
 
     def kill(self) -> None:
         """Stop the job and everything it started."""
@@ -312,7 +452,7 @@ class ProcessTree:
         elif self.process.poll() is None:
             if sys.platform == "win32":
                 subprocess.run(
-                    ["taskkill", "/T", "/F", "/PID", str(self.process.pid)],
+                    [_system_program("taskkill.exe"), "/T", "/F", "/PID", str(self.process.pid)],
                     capture_output=True,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
@@ -337,6 +477,19 @@ def _unmap(drive: str | None) -> None:
         result = _mpr.WNetCancelConnection2W(drive, 0, True)
         if result:
             log.warning("Couldn't remove the drive letter %s (Windows error %s)", drive, result)
+
+
+def remove_leftover_drive(drive: str, share: str) -> bool:
+    """Remove a drive letter that a stopped engine mapped, if it still points to its share."""
+    if sys.platform != "win32":
+        return False
+    buffer = ctypes.create_unicode_buffer(1024)
+    size = wintypes.DWORD(len(buffer))
+    if _mpr.WNetGetConnectionW(drive, buffer, ctypes.byref(size)) != 0:
+        return False
+    if _same_path(buffer.value) != _same_path(share):
+        return False  # someone mapped the letter to something else meanwhile
+    return _mpr.WNetCancelConnection2W(drive, 0, True) == 0
 
 
 if sys.platform == "win32":
@@ -402,7 +555,13 @@ if sys.platform == "win32":
     _mpr.WNetAddConnection2W.restype = wintypes.DWORD
     _mpr.WNetCancelConnection2W.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL]
     _mpr.WNetCancelConnection2W.restype = wintypes.DWORD
+    _mpr.WNetGetConnectionW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    _mpr.WNetGetConnectionW.restype = wintypes.DWORD
+    _kernel32.SetDllDirectoryW.argtypes = [wintypes.LPCWSTR]
+    _kernel32.SetDllDirectoryW.restype = wintypes.BOOL
     _map_lock = threading.Lock()
+    # WNetAddConnection2W errors that only mean "this letter is taken, try the next one".
+    _LETTER_TAKEN = {85, 1202}  # ERROR_ALREADY_ASSIGNED, ERROR_DEVICE_ALREADY_REMEMBERED
 
     _EXTENDED_LIMIT_INFORMATION = 9
     _KILL_ON_JOB_CLOSE = 0x2000
@@ -434,18 +593,20 @@ if sys.platform == "win32":
             process.kill()
             raise OSError(f"Couldn't resume the job's process (status {status:#x})")
 
-    def _map_network_folder(folder: Path) -> tuple[str | None, Path]:
+    def _map_network_folder(folder: Path) -> tuple[str, str, Path]:
         """Map the share of a \\\\server\\share\\... folder to a free drive letter, because
-        cmd.exe can't start in a network folder. ProcessTree.release() removes it again,
-        also after the job was stopped."""
+        cmd.exe can't start in a network folder. Returns the letter, the share and the folder
+        on that letter. ProcessTree.release() removes it again, also after the job was stopped."""
         share, rest = os.path.splitdrive(str(folder))
         with _map_lock:
             used = _kernel32.GetLogicalDrives()
-            for letter in "ZYXWVUTSRQPONMLKJIHG":
+            for letter in "ZYXWVUTSRQPONMLKJIHGFED":
                 if used & (1 << (ord(letter) - ord("A"))):
                     continue
                 resource = _NetResource(dwType=_RESOURCETYPE_DISK, lpLocalName=f"{letter}:", lpRemoteName=share)
-                if _mpr.WNetAddConnection2W(ctypes.byref(resource), None, None, 0) == 0:
-                    return f"{letter}:", Path(f"{letter}:{rest or os.sep}")
-        log.warning("Couldn't map %s to a drive letter; the job switches there itself", share)
-        return None, folder
+                error = _mpr.WNetAddConnection2W(ctypes.byref(resource), None, None, 0)
+                if error == 0:
+                    return f"{letter}:", share, Path(f"{letter}:{rest or os.sep}")
+                if error not in _LETTER_TAKEN:
+                    raise OSError(f"Couldn't connect to {share} (Windows error {error})")
+        raise OSError(f"No free drive letter to run a batch file in {share}")

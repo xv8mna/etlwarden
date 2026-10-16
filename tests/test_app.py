@@ -12,6 +12,7 @@ from etlwarden import app as app_module  # noqa: E402
 from etlwarden import schedule as sched  # noqa: E402
 from etlwarden.app import JobDialog, MainWindow  # noqa: E402
 from etlwarden.db import Database  # noqa: E402
+from etlwarden.lock import SingleInstance  # noqa: E402
 
 # One Qt application for the whole test run: if it went away while windows still
 # existed, Qt would crash as Python exits, and the test run would count as failed.
@@ -99,20 +100,60 @@ def test_the_job_dialog_refuses_a_missing_file(qapp, tmp_path):
     assert dialog.error_label.text() == "That file doesn't exist."
 
 
-def test_a_running_job_cannot_be_deleted(qapp, data, script, monkeypatch):
+@pytest.fixture
+def dialogs(monkeypatch):
+    """Answers the window's questions with Yes and collects its messages, instead of waiting for a click."""
+    shown = []
+    monkeypatch.setattr(app_module.QMessageBox, "information", lambda *args: shown.append(args[2]))
+    monkeypatch.setattr(app_module.QMessageBox, "question", lambda *args: app_module.QMessageBox.StandardButton.Yes)
+    return shown
+
+
+def test_a_running_job_cannot_be_deleted(qapp, data, script, dialogs):
     db = Database(data.db)
     job_id = db.add_job("Busy", script("busy.py"), "python", sched.every(15))
     db.add_run(job_id, "manual", "queued")
-    db.engine_beat(4242, time.time(), time.time())  # an engine is running
     window = MainWindow(data)
     window.jobs_table.selectRow(0)
-    shown = []
-    monkeypatch.setattr(app_module.QMessageBox, "information", lambda *args: shown.append(args[2]))
 
-    window.delete_job()
+    with SingleInstance(data.engine_lock):  # an engine is running
+        window.delete_job()
 
     assert db.get_job(job_id) is not None
-    assert "running or waiting" in shown[0]
+    assert "running or waiting" in dialogs[0]
+    window.close()
+
+
+def test_a_job_the_engine_starts_while_asking_is_not_deleted(qapp, data, script, monkeypatch, dialogs):
+    db = Database(data.db)
+    job_id = db.add_job("Busy", script("busy.py"), "python", sched.every(15))
+    window = MainWindow(data)
+    window.jobs_table.selectRow(0)
+
+    def engine_starts_it(*args):
+        db.add_run(job_id, "schedule", "queued")
+        return app_module.QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(app_module.QMessageBox, "question", engine_starts_it)
+    with SingleInstance(data.engine_lock):
+        window.delete_job()
+
+    assert db.get_job(job_id) is not None
+    assert "running or waiting" in dialogs[0]
+    window.close()
+
+
+def test_an_idle_job_is_deleted_while_the_engine_runs(qapp, data, script, dialogs):
+    db = Database(data.db)
+    job_id = db.add_job("Idle", script("idle.py"), "python", sched.every(15))
+    window = MainWindow(data)
+    window.jobs_table.selectRow(0)
+
+    with SingleInstance(data.engine_lock):
+        window.delete_job()
+
+    assert db.get_job(job_id) is None
+    assert window.jobs_table.rowCount() == 0
     window.close()
 
 
@@ -198,24 +239,60 @@ def test_intervals_are_picked_from_a_list(qapp):
     assert dialog.schedule() == {"type": "interval", "minutes": 360}
 
 
-def test_a_job_left_waiting_by_a_stopped_engine_can_be_deleted(qapp, data, script, monkeypatch):
+def test_a_job_left_waiting_by_a_stopped_engine_can_be_deleted(qapp, data, script, dialogs):
     db = Database(data.db)
     job_id = db.add_job("Unwanted", script("unwanted.py"), "python", sched.every(15))
-    db.add_run(job_id, "manual", "queued")  # no engine is running
+    db.add_run(job_id, "manual", "queued")
+    db.engine_beat(4242, time.time(), time.time())  # a heartbeat, but the engine is gone
     window = MainWindow(data)
     window.jobs_table.selectRow(0)
-    monkeypatch.setattr(app_module.QMessageBox, "question", lambda *args: app_module.QMessageBox.StandardButton.Yes)
 
     window.delete_job()
 
     assert db.get_job(job_id) is None
+    assert dialogs == []
     window.close()
 
 
-def test_settings_drop_quotes_around_program_paths(qapp, data):
-    db = Database(data.db)
-    dialog = app_module.SettingsDialog(None, db.settings(), data)
+@pytest.fixture
+def settings_dialog(qapp, data, monkeypatch):
+    # Don't look through this computer's PATH and registry in the background.
+    monkeypatch.setattr(app_module.SettingsDialog, "_look_for_programs", lambda self: None)
+    return app_module.SettingsDialog(None, Database(data.db).settings(), data)
 
-    dialog.python_edit.setText(r' "C:\Python312\python.exe" ')
 
-    assert dialog.values()["python_path"] == r"C:\Python312\python.exe"
+def test_settings_drop_quotes_around_program_paths(settings_dialog):
+    settings_dialog.python_edit.setText(r' "C:\Python312\python.exe" ')
+
+    assert settings_dialog.values()["python_path"] == r"C:\Python312\python.exe"
+
+
+def test_settings_refuse_a_program_that_does_not_exist(settings_dialog, tmp_path):
+    settings_dialog.lua_edit.setText(str(tmp_path / "lua.exe"))
+
+    settings_dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+
+    assert not settings_dialog.result()
+    assert settings_dialog.error_label.text() == f"Lua: there's no program at {tmp_path / 'lua.exe'}."
+
+
+def test_settings_show_the_programs_used_by_default(settings_dialog):
+    settings_dialog.show_found({"tafl": r"C:\Tools\tafl.exe", "python": r"C:\Python312\python.exe", "lua": None})
+
+    assert settings_dialog.tafl_edit.placeholderText() == r"Default: C:\Tools\tafl.exe"
+    assert settings_dialog.python_edit.placeholderText() == r"Default: C:\Python312\python.exe"
+    assert settings_dialog.lua_edit.placeholderText() == "lua.exe, needed for Lua jobs"
+
+
+def test_a_file_of_unknown_type_asks_for_the_type(qapp, tmp_path):
+    notes = tmp_path / "notes.txt"
+    notes.write_text("")
+    dialog = JobDialog()
+    dialog.name_edit.setText("Notes")
+
+    dialog.path_edit.setText(str(notes))
+    dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+
+    assert dialog.kind_combo.currentData() is None
+    assert not dialog.result()
+    assert dialog.error_label.text() == "Choose the type of this job."

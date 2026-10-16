@@ -22,12 +22,12 @@ The job list is a SQLite file in the data folder: `%LOCALAPPDATA%\etlwarden` on 
 ### Download for Windows (no Python needed)
 
 1. Download `etlwarden-0.1.0-windows-x64.zip` from the [latest release](https://github.com/xv8mna/etlwarden/releases/latest).
-2. Unzip it into a folder of your choice, for example `C:\Tools\etlwarden`.
-3. Start `etlwarden.exe`.
+2. Unzip it. Inside is a folder called `etlwarden`; put it where you like, for example in `C:\Tools`, which gives `C:\Tools\etlwarden`. A newer version later goes into the same place.
+3. Start `etlwarden.exe` in that folder.
 
 The program isn't signed with a paid certificate, so Windows may say it protected your PC from an unknown app. Click **More info**, then **Run anyway**. At work, your IT department may have to allow it first.
 
-For the command line, the download has `etlwarden-console.exe`, for example `etlwarden-console status`. Python jobs still need Python installed, and TAFL, Lua, KNIME and Apache Hop jobs need their own programs.
+For the command line, the download has `etlwarden-console.exe`. In PowerShell, run it from its folder as `.\etlwarden-console status`, or with its full path, `C:\Tools\etlwarden\etlwarden-console.exe status`. Python jobs still need Python installed, and TAFL, Lua, KNIME and Apache Hop jobs need their own programs.
 
 ### From the source code
 
@@ -43,13 +43,13 @@ Start the window with `.venv\Scripts\etlwarden`. On Linux or macOS, use `.venv/b
 ## Use it
 
 1. Open the window.
-2. Click **Add job…**, choose the file, pick when it runs, and click OK. To try things out, use `examples/hello.py`.
+2. Click **Add job…**, choose the file, pick when it runs, and click OK. To try things out, use `examples/hello.py` (it is in the download too).
 3. Click **Start engine** at the bottom right.
 4. Select the job and click **Run now** to test it. The history shows the result. Double-click a run to see its log.
 
 TAFL projects (`.tafl`) run with `tafl run`, which calculates all tables and writes the exports. When a TAFL run fails, the history names the table, the step and the error. etlwarden finds `tafl.exe` and `lua.exe` on your PATH. If they aren't there, or for KNIME (`knime.exe`) and Apache Hop (`hop-run.bat`), set where the program is under **Settings**.
 
-Python jobs run with the Python you get by typing `python` in a new terminal, so they find the packages you installed there. If a job needs a particular environment, choose its `python.exe` under **Settings**.
+Python jobs run with the Python you get by typing `python` in a new terminal, so they find the packages you installed there. That includes Python from the Python install manager or the Microsoft Store. If `python` isn't on your PATH, etlwarden uses the `py` launcher or a Python registered with Windows. If a job needs a particular environment, choose its `python.exe` under **Settings**.
 
 ## Schedules and safety nets
 
@@ -90,11 +90,11 @@ To keep jobs running while nobody is logged on, for example on a server, use Tas
 5. **Conditions:** untick "Start the task only if the computer is on AC power".
 6. **Settings:** untick "Stop the task if it runs longer than" (by default Windows stops it after 3 days), and tick "If the task fails, restart every 1 minute".
 
-Open the window with the same data folder (`etlwarden.exe --data-dir C:\etlwarden-data`), and check with `etlwarden-console.exe --data-dir C:\etlwarden-data status`. A task that runs while nobody is logged on can't see mapped drive letters such as `Z:`, so give job files and the paths inside jobs as network paths like `\\server\share\...`.
+Open the window with the same data folder (`C:\Tools\etlwarden\etlwarden.exe --data-dir C:\etlwarden-data`), and check with `C:\Tools\etlwarden\etlwarden-console.exe --data-dir C:\etlwarden-data status`. A task that runs while nobody is logged on can't see mapped drive letters such as `Z:`, so give job files and the paths inside jobs as network paths like `\\server\share\...`.
 
 ## Command line
 
-With the download, run them as `etlwarden-console ...` in its folder. From the source code, run them in the project folder as `.venv\Scripts\etlwarden ...`, or activate the virtual environment first.
+With the download, run them as `.\etlwarden-console ...` in its folder (in cmd.exe, the `.\` isn't needed). From the source code, run them in the project folder as `.venv\Scripts\etlwarden ...`, or activate the virtual environment first.
 
 | Command | What it does |
 |---|---|
@@ -126,14 +126,14 @@ examples/
   hello.py      a tiny job to try things with
 packaging/      how the Windows download is built
 tests/          the automated tests (see below)
-.github/        the GitHub workflow that checks and tests every upload
+.github/        the GitHub workflow that checks and tests the code
 ```
 
-To work on etlwarden itself, install the test tools with `.venv\Scripts\python -m pip install -e ".[dev]"`. Then `.venv\Scripts\python -m ruff check etlwarden tests examples packaging` checks the code and `.venv\Scripts\python -m pytest` runs the tests. GitHub does both on every upload, on Windows with Python 3.10, 3.12 and 3.14; the badge at the top shows the result. To build the Windows download, install the build tools with `.venv\Scripts\python -m pip install -e ".[build]"` and run `.venv\Scripts\python packaging\build.py`. The zip ends up in `dist`.
+To work on etlwarden itself, install the test tools with `.venv\Scripts\python -m pip install -e ".[dev]"`. Then `.venv\Scripts\python -m ruff check etlwarden tests examples packaging` checks the code and `.venv\Scripts\python -m pytest` runs the tests. GitHub does both for every change to the main branch and every pull request, on Windows with Python 3.10, 3.12 and 3.14; the badge at the top shows the result. To build the Windows download, install the build tools with `.venv\Scripts\python -m pip install -e ".[build]"` and run `.venv\Scripts\python packaging\build.py`. The zip ends up in `dist`.
 
 ## Not there yet
 
-- It's tested on Windows only: on Windows 10 by hand, and on every upload by GitHub with Python 3.10, 3.12 and 3.14. Linux and macOS should work but haven't been tried, and there a job keeps running if the engine is killed hard.
+- It's tested on Windows only: on Windows 10 by hand, and by GitHub with Python 3.10, 3.12 and 3.14 for every change to the main branch and every pull request. Linux and macOS should work but haven't been tried, and there a job keeps running if the engine is killed hard.
 - TAFL jobs have been tried with the real TAFL. The KNIME and Apache Hop commands follow their documentation, and Lua jobs are a plain `lua script.lua`, but none of these three has been tried with a real installation yet.
 - Jobs start on a schedule or with Run now. There's no "when a file arrives" or "after another job" yet.
 - Nothing notifies you when a job fails. Check the history.
