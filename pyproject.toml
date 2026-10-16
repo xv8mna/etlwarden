@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etlwarden"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pick a file, set a time, and it runs in the background."
 readme = "README.md"
 license = "MIT"

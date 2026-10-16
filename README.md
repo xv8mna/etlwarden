@@ -21,7 +21,7 @@ The job list is a SQLite file in the data folder: `%LOCALAPPDATA%\etlwarden` on 
 
 ### Download for Windows (no Python needed)
 
-1. Download `etlwarden-0.1.0-windows-x64.zip` from the [latest release](https://github.com/xv8mna/etlwarden/releases/latest).
+1. Download `etlwarden-<version>-windows-x64.zip` from the [latest release](https://github.com/xv8mna/etlwarden/releases/latest).
 2. Unzip it. Inside is a folder called `etlwarden`; put it where you like, for example in `C:\Tools`, which gives `C:\Tools\etlwarden`. A newer version later goes into the same place.
 3. Start `etlwarden.exe` in that folder.
 
