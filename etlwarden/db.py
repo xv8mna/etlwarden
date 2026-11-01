@@ -29,14 +29,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     catch_up        INTEGER NOT NULL DEFAULT 1,   -- run once after a missed run time
     next_run        REAL,                         -- epoch seconds; NULL while disabled
     run_requested   INTEGER NOT NULL DEFAULT 0,   -- set by "Run now"
-    created_at      REAL    NOT NULL
+    created_at      REAL    NOT NULL,
+    nothing_code    INTEGER                       -- exit code for "nothing to do"; NULL means off
 );
 
 CREATE TABLE IF NOT EXISTS runs (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,  -- never used twice, because jobs hand it to other systems
     job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     started_by  TEXT    NOT NULL,  -- schedule, manual or catch-up
-    status      TEXT    NOT NULL,  -- queued, running, ok, failed, timeout, skipped, interrupted
+    status      TEXT    NOT NULL,  -- queued, running, ok, failed, timeout, skipped, interrupted, nothing
     queued_at   REAL    NOT NULL,
     started_at  REAL,
     finished_at REAL,
@@ -58,7 +59,8 @@ CREATE TABLE IF NOT EXISTS engine (
     pid            INTEGER,
     started_at     REAL,
     heartbeat      REAL,
-    stop_requested INTEGER NOT NULL DEFAULT 0
+    stop_requested INTEGER NOT NULL DEFAULT 0,
+    schema_version INTEGER                 -- the SCHEMA_VERSION the running engine knows
 );
 """
 
@@ -73,6 +75,18 @@ DEFAULT_SETTINGS = {
 }
 
 ACTIVE = ("queued", "running")
+
+# The shape of the job list, kept in PRAGMA user_version. Raise it for anything stored that an
+# older program can't do or would show wrongly: a column, a run status, a schedule type.
+SCHEMA_VERSION = 1
+
+# Columns added after the first release: (table, column, type).
+ADDED_COLUMNS = (
+    ("runs", "drive", "TEXT"),
+    ("runs", "share", "TEXT"),
+    ("jobs", "nothing_code", "INTEGER"),
+    ("engine", "schema_version", "INTEGER"),
+)
 
 # The engine writes a heartbeat every few seconds; older than this means it stopped.
 ENGINE_STALE_SECONDS = 20.0
@@ -90,6 +104,7 @@ class Job:
     catch_up: bool
     next_run: float | None
     run_requested: bool
+    nothing_code: int | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Job:
@@ -104,6 +119,7 @@ class Job:
             catch_up=bool(row["catch_up"]),
             next_run=row["next_run"],
             run_requested=bool(row["run_requested"]),
+            nothing_code=row["nothing_code"],
         )
 
 
@@ -133,23 +149,32 @@ class Run:
         return end - self.started_at
 
 
+class NewerJobList(Exception):
+    """A newer etlwarden has changed this job list. The message is meant for people."""
+
+
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         with closing(sqlite3.connect(self.path, timeout=30)) as conn:
             # WAL lets the window read while the engine writes. It stays on in the file.
             conn.execute("PRAGMA journal_mode = WAL")
+            found = conn.execute("PRAGMA user_version").fetchone()[0]
+        if found > SCHEMA_VERSION:
+            raise NewerJobList(
+                f"A newer version of etlwarden has changed this job list: {self.path}\n"
+                "This version can't use it safely. Update etlwarden to go on."
+            )
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            # All of it or none of it, and one program at a time.
+            conn.execute("BEGIN IMMEDIATE")
             conn.executemany(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
                 DEFAULT_SETTINGS.items(),
             )
-            # Columns added after the first release; job lists from 0.1.0 get them here.
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
-            for column in ("drive", "share"):
-                if column not in columns:
-                    conn.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+            if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                _upgrade(conn)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -175,6 +200,7 @@ class Database:
         enabled: bool = True,
         timeout_minutes: float = 60,
         catch_up: bool = True,
+        nothing_code: int | None = None,
         now: float | None = None,
     ) -> int:
         schedule = sched.validate(schedule)
@@ -182,10 +208,10 @@ class Database:
         with self.connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO jobs (name, path, kind, schedule, enabled, timeout_minutes,
-                                     catch_up, next_run, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     catch_up, nothing_code, next_run, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (name, str(path), kind, json.dumps(schedule), int(enabled), timeout_minutes,
-                 int(catch_up), next_run, time.time() if now is None else now),
+                 int(catch_up), nothing_code, next_run, time.time() if now is None else now),
             )
             return cursor.lastrowid
 
@@ -200,26 +226,28 @@ class Database:
         enabled: bool,
         timeout_minutes: float,
         catch_up: bool,
+        nothing_code: int | None = None,
         now: float | None = None,
     ) -> None:
         """Save an edited job. The next run time only changes if the schedule or the
         on/off switch did, so a missed run waiting for catch-up isn't lost by an edit."""
         schedule = sched.validate(schedule)
         old = self.get_job(job_id)
-        fields = (name, str(path), kind, json.dumps(schedule), int(enabled), timeout_minutes, int(catch_up))
+        fields = (name, str(path), kind, json.dumps(schedule), int(enabled), timeout_minutes, int(catch_up),
+                  nothing_code)
         with self.connect() as conn:
             if old is not None and old.enabled == enabled and _same_schedule(old.schedule, schedule):
                 # Leave next_run alone: the engine may move it on at this very moment.
                 conn.execute(
                     """UPDATE jobs SET name = ?, path = ?, kind = ?, schedule = ?, enabled = ?,
-                                       timeout_minutes = ?, catch_up = ?
+                                       timeout_minutes = ?, catch_up = ?, nothing_code = ?
                        WHERE id = ?""",
                     (*fields, job_id),
                 )
             else:
                 conn.execute(
                     """UPDATE jobs SET name = ?, path = ?, kind = ?, schedule = ?, enabled = ?,
-                                       timeout_minutes = ?, catch_up = ?, next_run = ?
+                                       timeout_minutes = ?, catch_up = ?, nothing_code = ?, next_run = ?
                        WHERE id = ?""",
                     (*fields, _first_run(schedule, enabled, now), job_id),
                 )
@@ -419,14 +447,18 @@ class Database:
             return cursor.rowcount
 
     def prune_runs(self, keep: int) -> list[str]:
-        """Delete finished runs beyond the newest `keep` per job; return their log files."""
+        """Delete finished runs beyond the newest `keep` per job; return their log files.
+        Each job's newest real result stays, so a long row of skipped or nothing-to-do
+        runs can't wipe out a failure that the job list still has to show."""
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT id, log_path FROM (
                        SELECT id, log_path, status,
                               ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY id DESC) AS position
                        FROM runs)
-                   WHERE position > ? AND status NOT IN (?, ?)""",
+                   WHERE position > ? AND status NOT IN (?, ?)
+                     AND id NOT IN (SELECT MAX(id) FROM runs
+                                    WHERE status IN ('ok', 'failed', 'timeout') GROUP BY job_id)""",
                 (keep, *ACTIVE),
             ).fetchall()
             conn.executemany("DELETE FROM runs WHERE id = ?", [(row["id"],) for row in rows])
@@ -451,8 +483,9 @@ class Database:
         return Run.from_row(row) if row else None
 
     def latest_runs(self) -> dict[int, Run]:
-        """The run that best describes each job's state, by job id: a run that's waiting
-        or running, otherwise the newest real run, and only then a skipped one."""
+        """The run that best describes each job's state, by job id: a run that's waiting or
+        running, otherwise the newest real run, and only then a skipped or nothing-to-do one.
+        So neither of those hides a failure: it stays until the job really runs again."""
         with self.connect() as conn:
             # Starting from jobs sorts each job's runs once, which keeps this fast
             # (the window asks every 2 seconds).
@@ -460,7 +493,8 @@ class Database:
                 """SELECT r.* FROM jobs AS j
                    JOIN runs AS r ON r.id = (SELECT x.id FROM runs AS x WHERE x.job_id = j.id
                                              ORDER BY x.status IN ('queued', 'running') DESC,
-                                                      x.status != 'skipped' DESC, x.id DESC
+                                                      x.status NOT IN ('skipped', 'nothing') DESC,
+                                                      x.id DESC
                                              LIMIT 1)"""
             ).fetchall()
         return {row["job_id"]: Run.from_row(row) for row in rows}
@@ -490,16 +524,22 @@ class Database:
         """The engine says "still here" on every check."""
         with self.connect() as conn:
             conn.execute(
-                """INSERT INTO engine (id, pid, started_at, heartbeat) VALUES (1, ?, ?, ?)
-                   ON CONFLICT (id) DO UPDATE SET pid = excluded.pid,
-                       started_at = excluded.started_at, heartbeat = excluded.heartbeat""",
-                (pid, started_at, now),
+                """INSERT INTO engine (id, pid, started_at, heartbeat, schema_version) VALUES (1, ?, ?, ?, ?)
+                   ON CONFLICT (id) DO UPDATE SET pid = excluded.pid, started_at = excluded.started_at,
+                       heartbeat = excluded.heartbeat, schema_version = excluded.schema_version""",
+                (pid, started_at, now, SCHEMA_VERSION),
             )
 
     def engine_state(self) -> dict | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM engine WHERE id = 1").fetchone()
         return dict(row) if row else None
+
+    def engine_outdated(self) -> bool:
+        """Whether the engine last seen knows an older job list than this program, so it would
+        ignore new settings. An engine from before these numbers leaves the field empty."""
+        state = self.engine_state()
+        return bool(state) and (state["schema_version"] or 0) < SCHEMA_VERSION
 
     def engine_alive(self, now: float | None = None) -> bool:
         state = self.engine_state()
@@ -526,8 +566,34 @@ class Database:
     def engine_stopped(self) -> None:
         with self.connect() as conn:
             conn.execute(
-                "UPDATE engine SET pid = NULL, heartbeat = NULL, stop_requested = 0 WHERE id = 1"
+                """UPDATE engine SET pid = NULL, heartbeat = NULL, stop_requested = 0, schema_version = NULL
+                   WHERE id = 1"""
             )
+
+
+def _upgrade(conn: sqlite3.Connection) -> None:
+    """Bring an older job list up to SCHEMA_VERSION, inside the caller's transaction, so a crash
+    leaves the old list as it was. Each step checks first: lists from 0.1.0 and 0.1.1 both read
+    as version 0, though they differ."""
+    for table, column, kind in ADDED_COLUMNS:
+        present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in present:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    create = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'runs'").fetchone()[0]
+    if "AUTOINCREMENT" not in create:
+        # ALTER TABLE can't add this, so the table is rebuilt the way SQLite describes. This
+        # comes after the columns, because it copies the stored definition.
+        indexes = [row["sql"] for row in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'runs'"
+        )]
+        conn.execute(create.replace("runs", "runs_new", 1)
+                     .replace("INTEGER PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT", 1))
+        conn.execute("INSERT INTO runs_new SELECT * FROM runs")
+        conn.execute("DROP TABLE runs")
+        conn.execute("ALTER TABLE runs_new RENAME TO runs")
+        for index in indexes:
+            conn.execute(index)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def int_setting(settings: dict[str, str], key: str) -> int:

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import runners, textfmt
 from . import schedule as sched
-from .db import Database, Job, Run, int_setting
+from .db import Database, Job, NewerJobList, Run, int_setting
 from .lock import AlreadyRunning, SingleInstance
 from .paths import DataDir
 
@@ -258,12 +258,13 @@ class Worker(threading.Thread):
     def _run_job(self) -> tuple[str, int | None, str | None]:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         started = time.strftime("%Y-%m-%d %H:%M:%S")
+        identity = f"Job:     {self.job.name}\nRun:     {self.run_id}\n"
         try:
             command = runners.build_command(self.job.kind, self.job.path, self.settings)
         except runners.RunnerError as exc:
-            self.log_path.write_text(f"Job:     {self.job.name}\nStarted: {started}\n\n{exc}\n", encoding="utf-8")
+            self.log_path.write_text(f"{identity}Started: {started}\n\n{exc}\n", encoding="utf-8")
             return "failed", None, str(exc)
-        header = (f"Job:     {self.job.name}\n"
+        header = (f"{identity}"
                   f"Command: {runners.display(command)}\n"
                   f"Started: {started}\n\n").encode()
         with open(self.log_path, "wb") as output:
@@ -273,14 +274,16 @@ class Worker(threading.Thread):
             self.tree = runners.start(
                 command, path if path.is_dir() else path.parent, output,
                 on_drive_mapped=lambda drive, share: self.db.set_run_drive(self.run_id, drive, share),
+                extra_env={"ETLWARDEN_JOB": self.job.name, "ETLWARDEN_RUN": str(self.run_id)},
             )
             if self._cancelled.is_set():
                 self.tree.kill()
             status, exit_code, message = self._wait()
-        if status == "failed":
+        if status in ("failed", "nothing"):
             summary = runners.failure_summary(self.job.kind, _output_tail(self.log_path, skip=len(header)))
             if summary:
-                message = f"{message}: {runners.shorten(summary, 300)}"
+                summary = runners.shorten(summary, 300)
+                message = f"{message}: {summary}" if message else summary
         return status, exit_code, message
 
     def _wait(self) -> tuple[str, int | None, str | None]:
@@ -296,6 +299,8 @@ class Worker(threading.Thread):
             return "interrupted", exit_code, "Stopped because the engine was shut down."
         if exit_code == 0:
             return "ok", 0, None
+        if exit_code == self.job.nothing_code:
+            return "nothing", exit_code, None
         return "failed", exit_code, f"Exit code {exit_code}"
 
 
@@ -358,7 +363,7 @@ def main(data: DataDir) -> int:
             log.info("Engine started, data folder: %s", data.root)
             engine.run_forever()
             log.info("Engine stopped")
-    except AlreadyRunning as exc:
+    except (AlreadyRunning, NewerJobList) as exc:
         log.error("%s", exc)
         return 1
     except Exception:  # the window only says "stopped right away", so the reason goes here

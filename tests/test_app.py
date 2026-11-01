@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 
@@ -42,7 +43,8 @@ def test_the_window_shows_jobs_and_their_history(qapp, data, script):
     assert window.jobs_table.item(0, 2).text() == "Mon–Fri at 06:00"
     assert window.jobs_table.item(0, 4).text().startswith("OK · today")
     assert window.runs_table.rowCount() == 1
-    assert window.runs_table.item(0, 2).text() == "5 s"
+    assert window.runs_table.item(0, 1).text() == str(run_id)
+    assert window.runs_table.item(0, 3).text() == "5 s"
     assert "not running" in window.engine_label.text()
     window.close()
 
@@ -74,7 +76,48 @@ def test_the_job_dialog_shows_a_job_as_it_was_saved(qapp, data, script):
         "enabled": True,
         "timeout_minutes": 5,
         "catch_up": False,
+        "nothing_code": None,
     }
+
+
+def test_the_job_dialog_keeps_the_nothing_to_do_code(qapp, data, script):
+    db = Database(data.db)
+    job_id = db.add_job("Report", script("report.py"), "python", sched.every(30), nothing_code=100)
+
+    dialog = JobDialog(job=db.get_job(job_id))
+
+    assert dialog.values()["nothing_code"] == 100
+    dialog.nothing_spin.setValue(dialog.nothing_spin.minimum())
+    assert dialog.nothing_spin.text() == "Off"
+    assert dialog.values()["nothing_code"] is None
+
+
+def test_nothing_to_do_shows_in_the_history_and_leaves_the_last_result_alone(qapp, data, script):
+    db = Database(data.db)
+    job_id = db.add_job("Daily load", script("load.py"), "python", sched.every(60))
+    db.finish_run(db.add_run(job_id, "schedule", "running"), "failed", exit_code=1)
+    db.finish_run(db.add_run(job_id, "schedule", "running"), "nothing", exit_code=100, message="no new files yet")
+
+    window = MainWindow(data)
+
+    assert window.jobs_table.item(0, 4).text().startswith("Failed")
+    assert window.runs_table.item(0, 5).text() == "Nothing to do"
+    assert window.runs_table.item(0, 6).text() == "no new files yet"
+    window.close()
+
+
+def test_the_window_says_when_an_older_engine_is_running(qapp, data):
+    db = Database(data.db)
+    db.engine_beat(os.getpid(), time.time(), time.time())
+    window = MainWindow(data)
+    assert window.engine_label.text() == "Engine running"
+
+    with db.connect() as conn:  # what an engine from 0.1 leaves behind
+        conn.execute("UPDATE engine SET schema_version = NULL")
+    window.refresh()
+
+    assert "older engine" in window.engine_label.text()
+    window.close()
 
 
 def test_choosing_a_file_fills_in_type_and_name(qapp, tmp_path):

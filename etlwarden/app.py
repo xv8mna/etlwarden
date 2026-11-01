@@ -65,6 +65,7 @@ RESULT_TEXT = {
     "timeout": "Time limit",
     "skipped": "Skipped",
     "interrupted": "Interrupted",
+    "nothing": "Nothing to do",
 }
 RESULT_COLOR = {
     "queued": BLUE,
@@ -74,6 +75,7 @@ RESULT_COLOR = {
     "timeout": RED,
     "skipped": GRAY,
     "interrupted": AMBER,
+    "nothing": GRAY,
 }
 STARTED_BY_TEXT = {"schedule": "Scheduled", "manual": "Run now", "catch-up": "Catch-up"}
 JOB_FILES = f"Job files ({' '.join('*' + suffix for suffix in runners.SUFFIXES)});;All files (*)"
@@ -107,7 +109,7 @@ class MainWindow(QMainWindow):
         self.show_all_button.setFlat(True)
         self.show_all_button.setStyleSheet(f"color: {BLUE}")
         self.show_all_button.clicked.connect(self.jobs_table.clearSelection)
-        self.runs_table = _table(["Job", "Started", "Took", "How", "Result", "Details"])
+        self.runs_table = _table(["Job", "Run", "Started", "Took", "How", "Result", "Details"])
         self.runs_table.itemDoubleClicked.connect(lambda _item: self.show_log())
         history = QWidget()
         history_layout = QVBoxLayout(history)
@@ -162,6 +164,7 @@ class MainWindow(QMainWindow):
             jobs = self.db.list_jobs()
             latest = self.db.latest_runs()
             alive = self.db.engine_alive(now)
+            outdated = alive and self.db.engine_outdated()
             self._show_jobs(jobs, latest, now)
             selected = self.selected_job_id()  # read after the table was rebuilt
             runs = self.db.runs(selected)
@@ -173,7 +176,7 @@ class MainWindow(QMainWindow):
         selected_name = names.get(selected)
         self.history_label.setText(f"History of {selected_name}" if selected_name else "History of all jobs")
         self.show_all_button.setVisible(selected_name is not None)
-        self._show_engine_state(alive, now)
+        self._show_engine_state(alive, now, outdated)
         for action in (self.edit_action, self.run_action, self.delete_action):
             action.setEnabled(selected is not None)
 
@@ -240,16 +243,17 @@ class MainWindow(QMainWindow):
                 first = _cell(job_name)
                 first.setData(Qt.ItemDataRole.UserRole, run_id)
                 table.setItem(row, 0, first)
-                table.setItem(row, 1, _cell(started))
-                table.setItem(row, 2, _cell(took))
-                table.setItem(row, 3, _cell(how))
-                table.setItem(row, 4, _cell(result, color))
-                table.setItem(row, 5, _cell(details))
+                table.setItem(row, 1, _cell(str(run_id)))
+                table.setItem(row, 2, _cell(started))
+                table.setItem(row, 3, _cell(took))
+                table.setItem(row, 4, _cell(how))
+                table.setItem(row, 5, _cell(result, color))
+                table.setItem(row, 6, _cell(details))
             _reselect(table, selected)
         finally:
             table.blockSignals(False)
 
-    def _show_engine_state(self, alive: bool, now: float) -> None:
+    def _show_engine_state(self, alive: bool, now: float, outdated: bool) -> None:
         pending = self._engine_pending
         started = self._engine_process
         if pending and pending[0] == "starting" and not alive and started and started.poll() is not None:
@@ -265,6 +269,8 @@ class MainWindow(QMainWindow):
         if pending:
             text = "Starting the engine…" if pending[0] == "starting" else "Stopping the engine…"
             color = GRAY
+        elif outdated:
+            text, color = "An older engine is running: stop it and start it again", AMBER
         elif alive:
             text, color = "Engine running", GREEN
         else:
@@ -457,6 +463,12 @@ class JobDialog(QDialog):
         self.timeout_spin.setSuffix(" min")
         self.timeout_spin.setSpecialValueText("No limit")
         self.timeout_spin.setToolTip("Stop the job if it runs longer than this")
+        self.nothing_spin = QSpinBox()
+        self.nothing_spin.setRange(1, 255)  # the lowest value shows as Off; 0 is success, 1 a plain error
+        self.nothing_spin.setPrefix("Exit code ")
+        self.nothing_spin.setSpecialValueText("Off")
+        self.nothing_spin.setToolTip("If the job ends with this exit code, it found no work. "
+                                     "The history then says Nothing to do, not Failed.")
         self.catch_up_box = QCheckBox("If the computer was off at the run time, run it once when it's back")
         self.enabled_box = QCheckBox("Enabled")
         self.error_label = QLabel()
@@ -476,6 +488,7 @@ class JobDialog(QDialog):
         form.addRow("Runs", when)
         form.addRow("", self.next_label)
         form.addRow("Time limit", _row(self.timeout_spin, stretch=True))
+        form.addRow("Nothing to do", _row(self.nothing_spin, stretch=True))
         form.addRow("", self.catch_up_box)
         form.addRow("", self.enabled_box)
         form.addRow(self.error_label)
@@ -521,6 +534,7 @@ class JobDialog(QDialog):
         for day, box in enumerate(self.day_boxes):
             box.setChecked(day in days)
         self.timeout_spin.setValue(round(job.timeout_minutes))
+        self.nothing_spin.setValue(job.nothing_code or self.nothing_spin.minimum())
         self.catch_up_box.setChecked(job.catch_up)
         self.enabled_box.setChecked(job.enabled)
         self._update_preview()
@@ -544,6 +558,7 @@ class JobDialog(QDialog):
 
     def values(self) -> dict:
         """The job as keyword arguments for Database.add_job and update_job."""
+        nothing_code = self.nothing_spin.value()
         return {
             "name": self.name_edit.text().strip(),
             "path": str(self.path()),
@@ -552,6 +567,7 @@ class JobDialog(QDialog):
             "enabled": self.enabled_box.isChecked(),
             "timeout_minutes": self.timeout_spin.value(),
             "catch_up": self.catch_up_box.isChecked(),
+            "nothing_code": nothing_code if nothing_code > self.nothing_spin.minimum() else None,
         }
 
     def _path_changed(self) -> None:

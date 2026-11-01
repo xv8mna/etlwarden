@@ -116,8 +116,8 @@ SUFFIXES = {
 
 
 def failure_summary(kind: str, output: str) -> str | None:
-    """The part of a failed job's output that best says what went wrong: TAFL's first
-    failed step, Lua's error message, or otherwise the last line (for Python, the exception)."""
+    """The part of a job's output that best says why it ended this way: TAFL's first failed
+    step, Lua's error message, or otherwise the last line (for Python, the exception)."""
     if kind == "tafl":
         summary = _tafl_failure(output)
         if summary:
@@ -325,11 +325,13 @@ def start(
     cwd: Path,
     output: IO[bytes],
     on_drive_mapped: Callable[[str, str], None] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> ProcessTree:
     """Start a job without a window, writing everything it prints into `output`.
 
     A batch file in a network folder gets a drive letter for the time it runs; it's
     passed to `on_drive_mapped(letter, share)` so a crashed engine can remove it later.
+    `extra_env` adds to the environment that job_environment() gives it.
     """
     options: dict = {}
     drive = None
@@ -349,7 +351,7 @@ def start(
         process = subprocess.Popen(
             command_line(command),
             cwd=cwd,
-            env=job_environment(),
+            env={**job_environment(), **(extra_env or {})},
             stdin=subprocess.DEVNULL,
             stdout=output,
             stderr=subprocess.STDOUT,

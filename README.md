@@ -17,13 +17,17 @@ Two programs share one job list:
 
 The job list is a SQLite file in the data folder: `%LOCALAPPDATA%\etlwarden` on Windows, `~/.local/share/etlwarden` on Linux and macOS.
 
+Built with Python and [PySide6](https://doc.qt.io/qtforpython-6/) (Qt), and developed with the help of [Claude](https://www.anthropic.com/claude) (Anthropic). Status: an early version, developed and tested on Windows; the [releases](https://github.com/xv8mna/etlwarden/releases) list the versions.
+
 ## Install
 
 ### Download for Windows (no Python needed)
 
 1. Download `etlwarden-<version>-windows-x64.zip` from the [latest release](https://github.com/xv8mna/etlwarden/releases/latest).
-2. Unzip it. Inside is a folder called `etlwarden`; put it where you like, for example in `C:\Tools`, which gives `C:\Tools\etlwarden`. A newer version later goes into the same place.
+2. Unzip it. Inside is a folder called `etlwarden`; put it where you like, for example in `C:\Tools`, which gives `C:\Tools\etlwarden`.
 3. Start `etlwarden.exe` in that folder.
+
+To update, stop the engine, put the newer folder in the same place, and start the engine again. If an older engine is still running, the window says so. The first start of a new version upgrades the job list, and your jobs and history stay. After that, keep using the new version: from 0.2 on, an older version refuses a job list that a newer one has changed.
 
 The program isn't signed with a paid certificate, so Windows may say it protected your PC from an unknown app. Click **More info**, then **Run anyway**. At work, your IT department may have to allow it first.
 
@@ -64,10 +68,26 @@ Each job also has:
 
 - **A time limit.** The engine stops the job, and anything it started, if it runs longer. The default is 60 minutes.
 - **Catch-up.** If the computer was off at the run time, the job runs once when it's back. Missing several run times still gives just one catch-up run. You can switch this off per job.
+- **A "nothing to do" exit code.** Some jobs often find no work, and that isn't a failure. Under **Nothing to do**, pick the exit code your job ends with in that case, from 2 to 255, such as 100. The history then says "Nothing to do" in gray, with the last line the job printed as the details. It counts as neither success nor failure: a job that failed stays red in the job list until it really runs again. This is off by default, so any other non-zero exit code stays a failure.
 
 A job never runs twice at the same time. If it's still busy when it's due again, that run is skipped and the history says why. On Windows, jobs also stop together with the engine, even if the engine is ended in Task Manager, so a restarted engine can't run a job a second time alongside it. At most 2 jobs run at once; the rest wait in a queue. You can change that number in **Settings**.
 
 A batch file counts as failed when it ends with a non-zero exit code (ERRORLEVEL). If it uses `exit /b` without a number after an error, the error's code counts.
+
+A batch file or PowerShell script that calls the real job must pass the exit code on, or the result is wrong. End a `.ps1` with `exit $LASTEXITCODE`. In a batch file, `if errorlevel 1 exit /b 1` turns every error into 1, so use `exit /b %ERRORLEVEL%` right after the program. In a `.cmd` file, even a `set` line after the program resets the code to 0.
+
+## What a job knows about its run
+
+Every job gets two environment variables:
+
+| Variable | Value |
+|---|---|
+| `ETLWARDEN_JOB` | The job's name, as in the job list |
+| `ETLWARDEN_RUN` | The number of this run, as in the **Run** column of the history and the `Run:` line of the log |
+
+A job can write the run number into its own records, so you can find the history entry from there. Each number is one job's run. It never comes back within one job list, not even after you delete a job, but another data folder counts on its own. Old entries are deleted after a while (the newest 100 per job stay, which you can change under **Settings**), and a number can then outlive its entry.
+
+If you start the file by hand, the variables aren't there, so read them with a fallback, such as `os.environ.get("ETLWARDEN_RUN")` in Python. In a batch file, put quotes around the name, or a name like `R&D load` runs `D load` as a command: `echo "%ETLWARDEN_JOB%"`.
 
 ## Start the engine with Windows
 
@@ -136,12 +156,8 @@ To work on etlwarden itself, install the test tools with `.venv\Scripts\python -
 - It's tested on Windows only: on Windows 10 by hand, and by GitHub with Python 3.10, 3.12 and 3.14 for every change to the main branch and every pull request. Linux and macOS should work but haven't been tried, and there a job keeps running if the engine is killed hard.
 - TAFL jobs have been tried with the real TAFL. The KNIME and Apache Hop commands follow their documentation, and Lua jobs are a plain `lua script.lua`, but none of these three has been tried with a real installation yet.
 - Jobs start on a schedule or with Run now. There's no "when a file arrives" or "after another job" yet.
-- Nothing notifies you when a job fails. Check the history.
+- Nothing notifies you when a job fails. Check the job list: a failed job stays red until it runs again.
 - The window shows the jobs on its own computer. For a server, open it over remote desktop.
-
-## How it was made
-
-etlwarden was built with [Claude](https://claude.com), Anthropic's AI, as a pair-programming partner: I described what I needed, Claude wrote the code, tests and documentation, and I tried it out and decided what went in. Every commit names Claude as co-author.
 
 ## License
 

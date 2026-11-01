@@ -9,7 +9,7 @@ import time
 
 from . import __version__, paths, runners, textfmt
 from . import schedule as sched
-from .db import Database
+from .db import Database, NewerJobList
 from .paths import DataDir, DataDirError
 
 
@@ -38,15 +38,19 @@ def main(argv: list[str] | None = None) -> int:
         _complain(f"etlwarden: {exc}")
         return 2
 
-    if args.command == "engine":
-        from .engine import main as engine_main
+    try:
+        if args.command == "engine":
+            from .engine import main as engine_main
 
-        return engine_main(data)
-    if args.command == "status":
-        return print_status(data)
-    from .app import main as app_main  # PySide6 is only needed for the window
+            return engine_main(data)
+        if args.command == "status":
+            return print_status(data)
+        from .app import main as app_main  # PySide6 is only needed for the window
 
-    return app_main(data)
+        return app_main(data)
+    except NewerJobList as exc:
+        _complain(f"etlwarden: {exc}")
+        return 2
 
 
 def _complain(message: str) -> None:
@@ -70,6 +74,8 @@ def print_status(data: DataDir) -> int:
     if db.engine_alive(now):
         ago = textfmt.duration(now - state["heartbeat"])
         print(f"Engine: running (process {state['pid']}, last check {ago} ago)")
+        if db.engine_outdated():
+            print("The engine is an older version: stop it and start it again.")
     else:
         print("Engine: not running")
     print(f"Data folder: {data.root}")

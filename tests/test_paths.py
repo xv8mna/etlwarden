@@ -1,6 +1,9 @@
+import time
+
 import pytest
 
 from etlwarden import cli, paths
+from etlwarden.db import SCHEMA_VERSION, Database
 
 
 def test_quotes_and_spaces_around_the_folder_are_ignored(tmp_path):
@@ -46,3 +49,22 @@ def test_status_does_not_start_a_job_list_in_the_wrong_folder(tmp_path, capsys):
     assert cli.main(["--data-dir", str(tmp_path), "status"]) == 2
     assert not (tmp_path / "etlwarden.db").exists()
     assert "no job list" in capsys.readouterr().err
+
+
+def test_status_refuses_a_job_list_from_a_newer_version(tmp_path, capsys):
+    db = Database(paths.DataDir(tmp_path).db)
+    with db.connect() as conn:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+
+    assert cli.main(["--data-dir", str(tmp_path), "status"]) == 2
+    assert "newer version" in capsys.readouterr().err
+
+
+def test_status_says_when_an_older_engine_is_running(tmp_path, capsys):
+    db = Database(paths.DataDir(tmp_path).db)
+    db.engine_beat(4242, time.time(), time.time())
+    with db.connect() as conn:  # an engine from 0.1 writes no number
+        conn.execute("UPDATE engine SET schema_version = NULL")
+
+    assert cli.main(["--data-dir", str(tmp_path), "status"]) == 0
+    assert "older version" in capsys.readouterr().out

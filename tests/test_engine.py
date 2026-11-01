@@ -472,3 +472,70 @@ def test_jobs_end_with_the_engine_even_when_it_is_killed(data, script, tmp_path)
 
     Engine(data).recover()  # the next engine finds the run cut short, and nothing else running
     assert db.runs(job_id)[0].status == "interrupted"
+
+
+def test_a_job_knows_its_name_and_its_run(data, script):
+    path = script("who.py", "import os\nprint(os.environ['ETLWARDEN_JOB'], os.environ['ETLWARDEN_RUN'], sep='|')")
+    engine = make_engine(data)
+    job_id = engine.db.add_job("R&D load", path, "python", sched.every(60))
+
+    run = run_now(engine, job_id)
+
+    log = Path(run.log_path).read_text(encoding="utf-8")
+    assert f"R&D load|{run.id}" in log
+    assert f"Run:     {run.id}\n" in log
+
+
+def test_a_job_that_cannot_start_still_names_its_run_in_the_log(data):
+    engine = make_engine(data)
+    job_id = engine.db.add_job("Unknown", "x.abc", "no-such-kind", sched.every(60))
+
+    run = run_now(engine, job_id)
+
+    assert run.status == "failed"
+    assert f"Run:     {run.id}\n" in Path(run.log_path).read_text(encoding="utf-8")
+
+
+def test_the_agreed_exit_code_means_nothing_to_do(data, script):
+    path = script("load.py", "import sys\nprint('no new files yet')\nsys.exit(100)")
+    engine = make_engine(data)
+    job_id = engine.db.add_job("Daily load", path, "python", sched.every(60), nothing_code=100)
+
+    run = run_now(engine, job_id)
+
+    assert (run.status, run.exit_code, run.message) == ("nothing", 100, "no new files yet")
+
+
+def test_a_job_that_prints_nothing_can_still_have_nothing_to_do(data, script):
+    path = script("load.py", "import sys\nsys.exit(100)")
+    engine = make_engine(data)
+    job_id = engine.db.add_job("Daily load", path, "python", sched.every(60), nothing_code=100)
+
+    run = run_now(engine, job_id)
+
+    assert (run.status, run.message) == ("nothing", None)
+
+
+def test_without_the_setting_the_same_exit_code_is_a_failure(data, script):
+    path = script("load.py", "import sys\nsys.exit(100)")
+    engine = make_engine(data)
+    job_id = engine.db.add_job("Daily load", path, "python", sched.every(60))
+
+    assert run_now(engine, job_id).status == "failed"
+
+
+def test_another_exit_code_stays_a_failure(data, script):
+    path = script("load.py", "import sys\nsys.exit(3)")
+    engine = make_engine(data)
+    job_id = engine.db.add_job("Daily load", path, "python", sched.every(60), nothing_code=100)
+
+    assert run_now(engine, job_id).status == "failed"
+
+
+def test_the_time_limit_is_never_read_as_nothing_to_do(data, script):
+    path = script("hang.py", "import time\ntime.sleep(60)")
+    engine = make_engine(data)
+    # A job that's stopped ends with exit code 1, so this is the code that could be confused.
+    job_id = engine.db.add_job("Hang", path, "python", sched.every(60), timeout_minutes=0.02, nothing_code=1)
+
+    assert run_now(engine, job_id).status == "timeout"
