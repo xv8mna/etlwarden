@@ -304,6 +304,14 @@ def settings_dialog(qapp, data, monkeypatch):
     return app_module.SettingsDialog(None, Database(data.db).settings(), data)
 
 
+def test_settings_can_switch_notifications_off(settings_dialog):
+    assert settings_dialog.values()["notify_failures"] == 1
+
+    settings_dialog.notify_box.setChecked(False)
+
+    assert settings_dialog.values()["notify_failures"] == 0
+
+
 def test_settings_drop_quotes_around_program_paths(settings_dialog):
     settings_dialog.python_edit.setText(r' "C:\Python312\python.exe" ')
 

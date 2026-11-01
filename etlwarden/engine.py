@@ -22,7 +22,7 @@ from collections.abc import Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from . import runners, textfmt
+from . import notify, runners, textfmt
 from . import schedule as sched
 from .db import Database, Job, NewerJobList, Run, int_setting
 from .lock import AlreadyRunning, SingleInstance
@@ -36,6 +36,9 @@ POLL_SECONDS = 5.0
 MISSED_AFTER_SECONDS = 120.0
 PRUNE_EVERY_SECONDS = 3600.0
 HEARTBEAT_SECONDS = 5.0
+# At most one notification per job in this time, so a job that fails every few minutes
+# doesn't flood the screen. A daily job still gets one a day. "Run now" always gets one.
+ALERT_EVERY_SECONDS = 20 * 3600.0
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -46,15 +49,18 @@ class Engine:
         *,
         poll_seconds: float = POLL_SECONDS,
         clock: Callable[[], float] = time.time,
+        notify: Callable[[str, str], None] | None = None,
     ) -> None:
         self.data = data
         self.db = Database(data.db)
         self.poll_seconds = poll_seconds
         self.clock = clock
+        self.notify = notify
         self.started_at = clock()
         self._stop = threading.Event()
         self._workers: dict[int, Worker] = {}
         self._last_prune = 0.0
+        self._last_alert: dict[int, float] = {}
 
     def run_forever(self) -> None:
         self.recover()
@@ -141,9 +147,10 @@ class Engine:
             try:
                 next_run = sched.next_run_after(job.schedule, now)
             except sched.ScheduleError as exc:  # saved by an older version; don't block the others
-                self.db.record_due(job.id, None, "schedule", "failed",
-                                   message=f"The schedule needs fixing: {exc} Edit the job to set it again.", now=now)
+                message = f"The schedule needs fixing: {exc} Edit the job to set it again."
+                self.db.record_due(job.id, None, "schedule", "failed", message=message, now=now)
                 log.warning("%s: invalid schedule: %s", job.name, exc)
+                self.alert(job, "schedule", "failed", message)
                 continue
             missed = now - job.next_run > MISSED_AFTER_SECONDS
             started_by = "catch-up" if missed else "schedule"
@@ -191,11 +198,28 @@ class Engine:
             # network folder can't hold up this loop.
             log_path = self.data.run_log(job.id, run.id)
             self.db.mark_running(run.id, str(log_path), now)
-            worker = Worker(self.db, run, job, settings, log_path, self.clock)
+            worker = Worker(self.db, run, job, settings, log_path, self.clock, self.alert)
             self._workers[run.id] = worker
             worker.start()
             free_slots -= 1
             log.info("%s: started", job.name)
+
+    def alert(self, job: Job, started_by: str, status: str, message: str | None) -> None:
+        """Tell the person at the PC about a failure. The result is already saved, so nothing
+        here can harm it. A try that didn't work doesn't count: the next failure tries again."""
+        if self.notify is None or status not in ("failed", "timeout"):
+            return
+        try:
+            if not int_setting(self.db.settings(), "notify_failures"):
+                return
+            now = self.clock()
+            last = self._last_alert.get(job.id)
+            if started_by != "manual" and last is not None and now - last < ALERT_EVERY_SECONDS:
+                return
+            self.notify(f"etlwarden: {job.name}", message or "The job failed.")
+            self._last_alert[job.id] = now
+        except Exception:
+            log.exception("Couldn't show the notification for %s", job.name)
 
     def _reap(self) -> None:
         for run_id, worker in list(self._workers.items()):
@@ -222,10 +246,13 @@ class Worker(threading.Thread):
         settings: dict[str, str],
         log_path: Path,
         clock: Callable[[], float],
+        on_end: Callable[[Job, str, str, str | None], None],
     ) -> None:
         super().__init__(name=f"run-{run.id}", daemon=True)
         self.db = db
         self.run_id = run.id
+        self.started_by = run.started_by
+        self.on_end = on_end
         self.job = job
         self.settings = settings
         self.log_path = log_path
@@ -254,6 +281,7 @@ class Worker(threading.Thread):
             self.db.finish_run(self.run_id, status, exit_code=exit_code, message=message,
                                job_id=self.job.id, now=self.clock())
             log.info("%s: %s", self.job.name, status)
+            self.on_end(self.job, self.started_by, status, message)
 
     def _run_job(self) -> tuple[str, int | None, str | None]:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -356,7 +384,8 @@ def main(data: DataDir) -> int:
     _setup_logging(data.engine_log)
     try:
         with SingleInstance(data.engine_lock):
-            engine = Engine(data)
+            # Only here, so the tests can never show a real notification.
+            engine = Engine(data, notify=notify.toast if sys.platform == "win32" else None)
             for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
                 if hasattr(signal, name):
                     signal.signal(getattr(signal, name), lambda *_: engine.stop())

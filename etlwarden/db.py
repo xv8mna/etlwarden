@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS engine (
 DEFAULT_SETTINGS = {
     "max_parallel": "2",  # jobs that may run at the same time
     "keep_runs": "100",  # history entries kept per job
+    "notify_failures": "1",  # 1 shows a Windows notification when a job fails
     "tafl_path": "",  # tafl.exe; empty means the one found on PATH
     "python_path": "",  # Python for .py jobs; empty means the python found on PATH (runners.default_python)
     "lua_path": "",  # lua.exe; empty means the one found on PATH

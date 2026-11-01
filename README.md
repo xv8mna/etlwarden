@@ -76,6 +76,16 @@ A batch file counts as failed when it ends with a non-zero exit code (ERRORLEVEL
 
 A batch file or PowerShell script that calls the real job must pass the exit code on, or the result is wrong. End a `.ps1` with `exit $LASTEXITCODE`. In a batch file, `if errorlevel 1 exit /b 1` turns every error into 1, so use `exit /b %ERRORLEVEL%` right after the program. In a `.cmd` file, even a `set` line after the program resets the code to 0.
 
+## When a job fails
+
+A job that failed stays red in the job list until it really runs again. On Windows, the engine also shows a notification in the corner of the screen when a job fails or reaches its time limit, with the job's name and the reason. It comes from the engine, so the window can stay closed. To try it, add `examples/fail.py` as a job and click **Run now**.
+
+- A job gets at most one notification in 20 hours, so a job that fails every few minutes doesn't flood your screen. A daily job gets one each day it fails. **Run now** always gets one.
+- A run that ends with "Nothing to do", or that's skipped, sends nothing.
+- The top line says "Windows PowerShell", because etlwarden uses PowerShell to show the message. That's why it needs no installation.
+- You can switch it off under **Settings**. If a notification can't be shown, the reason is in `engine.log` in the data folder.
+- An engine started with "Run whether user is logged on or not" (see below) can't show notifications, because that task has no screen. Use the job list or `etlwarden status` there.
+
 ## What a job knows about its run
 
 Every job gets two environment variables:
@@ -140,10 +150,12 @@ etlwarden/
   runners.py    how each kind of file is started and stopped
   paths.py      where the data folder is
   lock.py       only one engine per data folder
+  notify.py     the notification when a job fails
   textfmt.py    times, durations and job output shown to people
   cli.py        the etlwarden command
 examples/
   hello.py      a tiny job to try things with
+  fail.py       a job that fails, to try the notification
 packaging/      how the Windows download is built
 tests/          the automated tests (see below)
 .github/        the GitHub workflow that checks and tests the code
@@ -156,7 +168,7 @@ To work on etlwarden itself, install the test tools with `.venv\Scripts\python -
 - It's tested on Windows only: on Windows 10 by hand, and by GitHub with Python 3.10, 3.12 and 3.14 for every change to the main branch and every pull request. Linux and macOS should work but haven't been tried, and there a job keeps running if the engine is killed hard.
 - TAFL jobs have been tried with the real TAFL. The KNIME and Apache Hop commands follow their documentation, and Lua jobs are a plain `lua script.lua`, but none of these three has been tried with a real installation yet.
 - Jobs start on a schedule or with Run now. There's no "when a file arrives" or "after another job" yet.
-- Nothing notifies you when a job fails. Check the job list: a failed job stays red until it runs again.
+- Notifications work on Windows only, and there's no email. If the engine itself isn't running, nothing notifies you: the window then says so in red.
 - The window shows the jobs on its own computer. For a server, open it over remote desktop.
 
 ## License

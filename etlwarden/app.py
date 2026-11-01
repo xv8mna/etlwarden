@@ -680,6 +680,8 @@ class SettingsDialog(QDialog):
         self.keep_spin.setRange(10, 100_000)
         self.keep_spin.setValue(int_setting(settings, "keep_runs"))
         self.keep_spin.setSuffix(" runs per job")
+        self.notify_box = QCheckBox("Show a Windows notification when a job fails")
+        self.notify_box.setChecked(bool(int_setting(settings, "notify_failures")))
         self.tafl_edit = QLineEdit(settings["tafl_path"])
         self.python_edit = QLineEdit(settings["python_path"])
         self.lua_edit = QLineEdit(settings["lua_path"])
@@ -715,6 +717,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout(self)
         form.addRow("Jobs at the same time", self.parallel_spin)
         form.addRow("Keep history", self.keep_spin)
+        form.addRow("", self.notify_box)
         form.addRow("TAFL", _row(self.tafl_edit, self._browse(self.tafl_edit, "TAFL", programs)))
         form.addRow("Python", _row(self.python_edit, self._browse(self.python_edit, "Python", programs)))
         form.addRow("", python_note)
@@ -778,6 +781,7 @@ class SettingsDialog(QDialog):
         return {
             "max_parallel": self.parallel_spin.value(),
             "keep_runs": self.keep_spin.value(),
+            "notify_failures": int(self.notify_box.isChecked()),
             "tafl_path": _program_path(self.tafl_edit.text()),
             "python_path": _program_path(self.python_edit.text()),
             "lua_path": _program_path(self.lua_edit.text()),

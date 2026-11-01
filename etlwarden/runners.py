@@ -376,10 +376,10 @@ def command_line(command: list[str]) -> list[str] | str:
         return command
     parts = " ".join(_cmd_quote(part) for part in [f'"{command[0]}"', *command[1:]])
     line = f"{parts} & call exit /b %^errorlevel%" if "^" in "".join(command) else f"call {parts}"
-    return f'"{_system_program("cmd.exe")}" /d /s /c "{line}"'
+    return f'"{system_program("cmd.exe")}" /d /s /c "{line}"'
 
 
-def _system_program(name: str) -> str:
+def system_program(name: str) -> str:
     return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", name)
 
 
@@ -454,7 +454,7 @@ class ProcessTree:
         elif self.process.poll() is None:
             if sys.platform == "win32":
                 subprocess.run(
-                    [_system_program("taskkill.exe"), "/T", "/F", "/PID", str(self.process.pid)],
+                    [system_program("taskkill.exe"), "/T", "/F", "/PID", str(self.process.pid)],
                     capture_output=True,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
