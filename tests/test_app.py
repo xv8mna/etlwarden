@@ -312,6 +312,14 @@ def test_settings_can_switch_notifications_off(settings_dialog):
     assert settings_dialog.values()["notify_failures"] == 0
 
 
+def test_settings_can_switch_the_icon_off(settings_dialog):
+    assert settings_dialog.values()["tray_icon"] == 1
+
+    settings_dialog.tray_box.setChecked(False)
+
+    assert settings_dialog.values()["tray_icon"] == 0
+
+
 def test_settings_drop_quotes_around_program_paths(settings_dialog):
     settings_dialog.python_edit.setText(r' "C:\Python312\python.exe" ')
 

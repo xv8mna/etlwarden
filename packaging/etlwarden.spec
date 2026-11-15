@@ -54,7 +54,7 @@ def version_file(program: str) -> str:
 a = Analysis(
     [str(ROOT / "packaging" / "launcher.py")],
     pathex=[str(ROOT)],
-    datas=[(str(ROOT / "etlwarden" / "icon.png"), "etlwarden")],
+    datas=[(str(ROOT / "etlwarden" / name), "etlwarden") for name in ("icon.png", "tray.ico", "tray-error.ico")],
     excludes=["tkinter", "unittest", "pydoc", "pytest", "_pytest", "PyInstaller", "PySide6.QtNetwork"],
     # Qt for Python's own Python code as plain files, not inside the .exe, so it can be
     # replaced like the Qt DLLs (its license, the LGPL, asks for that).

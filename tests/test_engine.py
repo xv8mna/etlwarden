@@ -225,6 +225,12 @@ def test_from_source_the_engine_starts_as_a_python_module(data):
     assert command[1:] == ["-m", "etlwarden", "--data-dir", str(data.root), "engine"]
 
 
+def test_the_window_starts_with_the_same_program_and_data_folder(data):
+    command, _cwd = engine_module.window_command(data)
+    assert command[1:] == ["-m", "etlwarden", "--data-dir", str(data.root)]
+    assert engine_module.engine_command(data)[0] == [*command, "engine"]
+
+
 def test_a_restart_marks_unfinished_runs_as_interrupted(data, script):
     db = Database(data.db)
     job_id = db.add_job("Hello", script("ok.py"), "python", sched.every(60))
@@ -454,6 +460,7 @@ def test_jobs_end_with_the_engine_even_when_it_is_killed(data, script, tmp_path)
     db = Database(data.db)
     job_id = db.add_job("Long", job, "python", sched.every(60))
     db.request_run(job_id)
+    db.save_settings({"tray_icon": 0})  # a killed engine can leave its icon until the mouse passes over it
 
     process = engine_module.start_in_background(data)
     engine_pid = None

@@ -86,6 +86,15 @@ A job that failed stays red in the job list until it really runs again. On Windo
 - You can switch it off under **Settings**. If a notification can't be shown, the reason is in `engine.log` in the data folder.
 - An engine started with "Run whether user is logged on or not" (see below) can't show notifications, because that task has no screen. Use the job list or `etlwarden status` there.
 
+## The icon next to the clock
+
+On Windows, the engine shows its icon next to the clock while it runs, so you can see that it's there without opening the window.
+
+- Point at it to see the engine's state. A small red mark on the icon means a job failed, the same as a red job in the job list.
+- Click it to open the window. Right-click it for **Stop engine**.
+- If you don't see it, Windows has put it behind the **^** arrow next to the clock. Drag it out to keep it in view; only you can do that, not a program.
+- You can switch it off under **Settings**. Like the notifications, it can't show for an engine started with "Run whether user is logged on or not".
+
 ## What a job knows about its run
 
 Every job gets two environment variables:
@@ -151,6 +160,7 @@ etlwarden/
   paths.py      where the data folder is
   lock.py       only one engine per data folder
   notify.py     the notification when a job fails
+  tray.py       the engine's icon next to the clock
   textfmt.py    times, durations and job output shown to people
   cli.py        the etlwarden command
 examples/

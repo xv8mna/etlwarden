@@ -381,12 +381,7 @@ class MainWindow(QMainWindow):
         if self._engine_alive:
             running = self.db.count_running()
             if running:
-                answer = QMessageBox.question(
-                    self,
-                    "Stop the engine",
-                    f"{running} job{'s are' if running > 1 else ' is'} running right now. "
-                    "Stopping the engine stops them too. Stop anyway?",
-                )
+                answer = QMessageBox.question(self, "Stop the engine", textfmt.stop_question(running))
                 if answer != QMessageBox.StandardButton.Yes:
                     return
             self.db.request_engine_stop()
@@ -682,6 +677,8 @@ class SettingsDialog(QDialog):
         self.keep_spin.setSuffix(" runs per job")
         self.notify_box = QCheckBox("Show a Windows notification when a job fails")
         self.notify_box.setChecked(bool(int_setting(settings, "notify_failures")))
+        self.tray_box = QCheckBox("Show an icon next to the clock while the engine runs")
+        self.tray_box.setChecked(bool(int_setting(settings, "tray_icon")))
         self.tafl_edit = QLineEdit(settings["tafl_path"])
         self.python_edit = QLineEdit(settings["python_path"])
         self.lua_edit = QLineEdit(settings["lua_path"])
@@ -718,6 +715,7 @@ class SettingsDialog(QDialog):
         form.addRow("Jobs at the same time", self.parallel_spin)
         form.addRow("Keep history", self.keep_spin)
         form.addRow("", self.notify_box)
+        form.addRow("", self.tray_box)
         form.addRow("TAFL", _row(self.tafl_edit, self._browse(self.tafl_edit, "TAFL", programs)))
         form.addRow("Python", _row(self.python_edit, self._browse(self.python_edit, "Python", programs)))
         form.addRow("", python_note)
@@ -782,6 +780,7 @@ class SettingsDialog(QDialog):
             "max_parallel": self.parallel_spin.value(),
             "keep_runs": self.keep_spin.value(),
             "notify_failures": int(self.notify_box.isChecked()),
+            "tray_icon": int(self.tray_box.isChecked()),
             "tafl_path": _program_path(self.tafl_edit.text()),
             "python_path": _program_path(self.python_edit.text()),
             "lua_path": _program_path(self.lua_edit.text()),

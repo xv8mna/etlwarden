@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etlwarden"
-version = "0.3.0"
+version = "0.4.0"
 description = "Pick a file, set a time, and it runs in the background."
 readme = "README.md"
 license = "MIT"
@@ -28,7 +28,7 @@ etlwarden = "etlwarden.cli:main"
 packages = ["etlwarden"]
 
 [tool.setuptools.package-data]
-etlwarden = ["icon.png"]
+etlwarden = ["icon.png", "tray.ico", "tray-error.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

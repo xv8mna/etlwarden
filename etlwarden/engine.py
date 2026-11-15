@@ -21,12 +21,13 @@ import time
 from collections.abc import Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from . import notify, runners, textfmt
 from . import schedule as sched
 from .db import Database, Job, NewerJobList, Run, int_setting
 from .lock import AlreadyRunning, SingleInstance
-from .paths import DataDir
+from .paths import DataDir, default_root
 
 log = logging.getLogger("etlwarden.engine")
 
@@ -39,6 +40,7 @@ HEARTBEAT_SECONDS = 5.0
 # At most one notification per job in this time, so a job that fails every few minutes
 # doesn't flood the screen. A daily job still gets one a day. "Run now" always gets one.
 ALERT_EVERY_SECONDS = 20 * 3600.0
+TOOLTIP_LENGTH = 127  # what Windows shows when the mouse rests on the icon
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -50,6 +52,7 @@ class Engine:
         poll_seconds: float = POLL_SECONDS,
         clock: Callable[[], float] = time.time,
         notify: Callable[[str, str], None] | None = None,
+        tray: Callable[[Callable[[], None], Callable[[], None]], Any] | None = None,
     ) -> None:
         self.data = data
         self.db = Database(data.db)
@@ -61,6 +64,10 @@ class Engine:
         self._workers: dict[int, Worker] = {}
         self._last_prune = 0.0
         self._last_alert: dict[int, float] = {}
+        # Makes the icon next to the clock from (on_open, on_stop); see tray.Tray.
+        self.tray = tray
+        self._tray_icon: Any = None
+        self._tray_broken = False
 
     def run_forever(self) -> None:
         self.recover()
@@ -83,6 +90,7 @@ class Engine:
             self._stop.set()
             beating.join(timeout=10)
             self.shutdown()
+            self._close_tray()  # last, so the icon says the engine runs until it really stops
 
     def _beat(self) -> None:
         while not self._stop.is_set():
@@ -106,6 +114,7 @@ class Engine:
         self._queue_due_jobs(now)
         self._queue_requested_runs(now)
         self._start_queued(now)
+        self._update_tray()
         if now - self._last_prune >= PRUNE_EVERY_SECONDS:
             self._prune()
             self._last_prune = now
@@ -221,6 +230,46 @@ class Engine:
         except Exception:
             log.exception("Couldn't show the notification for %s", job.name)
 
+    def _update_tray(self) -> None:
+        """Show, change or remove the icon next to the clock. A problem with it never stops the engine."""
+        if self.tray is None or self._tray_broken:
+            return
+        try:
+            if not int_setting(self.db.settings(), "tray_icon"):
+                self._close_tray()
+                return
+            if self._tray_icon is None:
+                icon = self.tray(self.open_window, self._stop_from_tray)
+                icon.start()
+                self._tray_icon = icon
+            failed = sum(run.status in ("failed", "timeout") for run in self.db.latest_runs().values())
+            self._tray_icon.show(tray_tooltip(failed, self.data), failed > 0)
+        except Exception:
+            self._tray_broken = True  # tried once; the next engine start tries again
+            log.exception("Couldn't show the icon next to the clock")
+
+    def _close_tray(self) -> None:
+        icon, self._tray_icon = self._tray_icon, None
+        if icon is not None:
+            try:
+                icon.close()
+            except Exception:
+                log.exception("Couldn't remove the icon next to the clock")
+
+    def open_window(self) -> None:
+        """Start the window for this data folder (a click on the icon)."""
+        try:
+            start_window(self.data)
+        except OSError:
+            log.exception("Couldn't open the window")
+
+    def _stop_from_tray(self) -> None:
+        running = self.db.count_running()
+        if running and not self._tray_icon.ask(textfmt.stop_question(running)):
+            return
+        log.info("Stop requested from the icon next to the clock")
+        self.stop()
+
     def _reap(self) -> None:
         for run_id, worker in list(self._workers.items()):
             if not worker.is_alive():
@@ -332,6 +381,19 @@ class Worker(threading.Thread):
         return "failed", exit_code, f"Exit code {exit_code}"
 
 
+def tray_tooltip(failed: int, data: DataDir) -> str:
+    """The text when the mouse rests on the icon: "Name - status", as Microsoft's guidance asks."""
+    text = "etlwarden - Engine running"
+    if failed:
+        text += f", {failed} job{'s' if failed > 1 else ''} failed"
+    if data.root != default_root():  # two data folders mean two engines and two icons
+        folder, room = str(data.root), TOOLTIP_LENGTH - len(text) - 1
+        if len(folder) > room:  # keep the end, which tells the folders apart
+            folder = "…" + folder[-(room - 1):]
+        text += f"\n{folder}"
+    return text
+
+
 def _output_tail(path: Path, skip: int, size: int = 64 * 1024) -> str:
     """The end of what a job printed (after the log header), where the reason for a failure is."""
     try:
@@ -346,23 +408,37 @@ def _output_tail(path: Path, skip: int, size: int = 64 * 1024) -> str:
     return textfmt.decode_output(tail)
 
 
-def engine_command(data: DataDir) -> tuple[list[str], Path]:
-    """The command that starts the engine as its own process, and the folder to start it in."""
+def window_command(data: DataDir) -> tuple[list[str], Path]:
+    """The command that opens the window for this data folder, and the folder to start it in."""
     if getattr(sys, "frozen", False):  # the standalone etlwarden.exe
         program = Path(sys.executable)
         windowless = program.with_name("etlwarden.exe")  # rather than etlwarden-console.exe
         if windowless.exists():
             program = windowless
-        return [str(program), "--data-dir", str(data.root), "engine"], program.parent
+        return [str(program), "--data-dir", str(data.root)], program.parent
     python = Path(sys.executable)
     if sys.platform == "win32" and python.with_name("pythonw.exe").exists():
         python = python.with_name("pythonw.exe")  # no console window
-    return [str(python), "-m", "etlwarden", "--data-dir", str(data.root), "engine"], PROJECT_ROOT
+    return [str(python), "-m", "etlwarden", "--data-dir", str(data.root)], PROJECT_ROOT
+
+
+def engine_command(data: DataDir) -> tuple[list[str], Path]:
+    """The command that starts the engine as its own process, and the folder to start it in."""
+    command, cwd = window_command(data)
+    return [*command, "engine"], cwd
 
 
 def start_in_background(data: DataDir) -> subprocess.Popen:
     """Start the engine as its own process. It keeps running after the window closes."""
-    command, cwd = engine_command(data)
+    return _start_detached(*engine_command(data))
+
+
+def start_window(data: DataDir) -> subprocess.Popen:
+    """Open the window as its own process, as the icon next to the clock does."""
+    return _start_detached(*window_command(data))
+
+
+def _start_detached(command: list[str], cwd: Path) -> subprocess.Popen:
     options: dict = {}
     if sys.platform == "win32":
         options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -384,8 +460,11 @@ def main(data: DataDir) -> int:
     _setup_logging(data.engine_log)
     try:
         with SingleInstance(data.engine_lock):
-            # Only here, so the tests can never show a real notification.
-            engine = Engine(data, notify=notify.toast if sys.platform == "win32" else None)
+            # Only here, so the tests can never show a real notification or icon.
+            tray_icon = None
+            if sys.platform == "win32":
+                from .tray import Tray as tray_icon
+            engine = Engine(data, notify=notify.toast if sys.platform == "win32" else None, tray=tray_icon)
             for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
                 if hasattr(signal, name):
                     signal.signal(getattr(signal, name), lambda *_: engine.stop())

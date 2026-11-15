@@ -45,6 +45,12 @@ def duration(seconds: float | None) -> str:
     return f"{hours} h {minutes} min" if minutes else f"{hours} h"
 
 
+def stop_question(running: int) -> str:
+    """What the window and the icon ask before "Stop engine" ends running jobs."""
+    return (f"{running} job{'s are' if running > 1 else ' is'} running right now. "
+            "Stopping the engine stops them too. Stop anyway?")
+
+
 def decode_output(raw: bytes) -> str:
     """Text a program printed. Each line is read as UTF-8 when that's valid.
 
